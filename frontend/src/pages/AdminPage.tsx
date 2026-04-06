@@ -134,6 +134,8 @@ export default function AdminPage({ user }: Props) {
   const [importHistory, setImportHistory] = useState<ImportLogEntry[]>([]);
   const [importRunning, setImportRunning] = useState(false);
   const [importResult, setImportResult] = useState<string>('');
+  const [pcrRefreshRunning, setPcrRefreshRunning] = useState(false);
+  const [pcrRefreshResult, setPcrRefreshResult] = useState<string>('');
 
   useEffect(() => { loadUsers(); }, []);
 
@@ -322,6 +324,27 @@ export default function AdminPage({ user }: Props) {
       setImportResult(`Error: ${err.error || err.message}`);
     } finally {
       setImportRunning(false);
+    }
+  };
+
+  const refreshSalesFromPcr = async () => {
+    setPcrRefreshRunning(true);
+    setPcrRefreshResult('');
+    try {
+      const data = await api.post('/admin/refresh-sales-from-pcr', {});
+      if (data.success) {
+        const s = data.stats || {};
+        setPcrRefreshResult(`Refreshed ${data.inserted ?? s.total ?? '?'} rows. Range: ${s.min_date} → ${s.max_date}`);
+        showSuccess('Sales data refreshed from PCR');
+      } else {
+        setPcrRefreshResult(`Failed: ${data.error}`);
+        showError(data.error || 'Refresh failed');
+      }
+    } catch (err: any) {
+      setPcrRefreshResult(`Error: ${err.error || err.message}`);
+      showError(err.error || 'Failed to refresh');
+    } finally {
+      setPcrRefreshRunning(false);
     }
   };
 
@@ -924,6 +947,34 @@ export default function AdminPage({ user }: Props) {
       {/* ═══ DATA TAB ═══ */}
       {activeTab === 'data' && isAdmin && (
         <div className="space-y-6">
+
+          {/* PCR → sales_data refresh (Supabase only) */}
+          <div className="card">
+            <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between mb-4 gap-2">
+              <div>
+                <h2 className="font-bold text-navy-900">Refresh Sales from PCR (Supabase)</h2>
+                <p className="text-xs text-navy-500 mt-0.5">
+                  Rebuilds <code>sales_data</code> from the latest <code>pcr_sync_data.payload</code> uploaded by the AccountEdge intranet. No Google Drive involved.
+                </p>
+              </div>
+              <button
+                onClick={refreshSalesFromPcr}
+                disabled={pcrRefreshRunning}
+                className="btn-primary text-sm whitespace-nowrap"
+              >
+                {pcrRefreshRunning ? 'Refreshing…' : 'Refresh Sales Now'}
+              </button>
+            </div>
+            {pcrRefreshResult && (
+              <div className={`text-sm px-4 py-3 rounded-lg border ${
+                pcrRefreshResult.startsWith('Error') || pcrRefreshResult.startsWith('Failed')
+                  ? 'bg-red-50 text-red-700 border-red-200'
+                  : 'bg-green-50 text-green-700 border-green-200'
+              }`}>
+                {pcrRefreshResult}
+              </div>
+            )}
+          </div>
 
           {/* Google Drive Auto-Import */}
           <div className="card">

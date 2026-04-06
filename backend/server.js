@@ -11,7 +11,7 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const cron = require('node-cron');
 const { Resend } = require('resend');
-const { initDatabase, queryAll, queryOne, execute } = require('./src/db/init');
+const { initDatabase, queryAll, queryOne, execute, getPool } = require('./src/db/init');
 const { runGDriveImport } = require('./src/gdrive-import');
 
 // ─── EMAIL (RESEND) ───
@@ -1784,6 +1784,69 @@ async function startServer() {
       try { data = JSON.parse(text); } catch { data = text; }
       res.json({ success: response.ok, status: response.status, functionName, data });
     } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
+  // ─── REFRESH SALES_DATA from pcr_sync_data.payload (Supabase-only, no Google Drive) ───
+  app.post('/api/admin/refresh-sales-from-pcr', authenticate, async (req, res) => {
+    if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
+    const client = await getPool().connect();
+    try {
+      await client.query("SET statement_timeout = '15min'");
+      // Bootstrap (create-or-replace) the SQL function so this is self-healing
+      await client.query(`
+        CREATE OR REPLACE FUNCTION refresh_sales_data_from_pcr() RETURNS jsonb LANGUAGE plpgsql AS $func$
+        DECLARE
+          v_inserted int;
+          v_payload jsonb;
+        BEGIN
+          SET LOCAL statement_timeout = '15min';
+          SELECT payload INTO v_payload FROM pcr_sync_data ORDER BY intranet_uploaded_at DESC NULLS LAST LIMIT 1;
+          IF v_payload IS NULL THEN RETURN jsonb_build_object('error','no payload'); END IF;
+          DROP TABLE IF EXISTS _sales_scratch;
+          CREATE TEMP TABLE _sales_scratch AS
+            SELECT row FROM jsonb_array_elements(v_payload->'rows') AS row;
+          DELETE FROM sales_data WHERE imported_from_accountedge = true;
+          INSERT INTO sales_data
+            (sale_amount, sale_date, month, customer_name, item_name, quantity, salesperson, category, product_line, imported_from_accountedge, memo)
+          SELECT
+            ((row->>4)::numeric / 100.0)::real,
+            ((row->>3) || '-' || lpad((row->>2),2,'0') || '-' || lpad((row->>11),2,'0')),
+            ((row->>3) || '-' || lpad((row->>2),2,'0')),
+            (v_payload->'customers'->((row->>1)::int))#>>'{}',
+            (v_payload->'skus'->((row->>7)::int))#>>'{}',
+            (row->>6)::int,
+            (v_payload->'sp'->((row->>10)::int))#>>'{}',
+            (v_payload->'cl1'->((row->>8)::int))#>>'{}',
+            (v_payload->'cl2'->((row->>9)::int))#>>'{}',
+            true,
+            'Invoice ' || (row->>5)
+          FROM _sales_scratch;
+          GET DIAGNOSTICS v_inserted = ROW_COUNT;
+          DROP TABLE _sales_scratch;
+          RETURN jsonb_build_object('inserted', v_inserted);
+        END $func$;
+      `);
+      // Run it
+      const r = await client.query('SELECT refresh_sales_data_from_pcr() AS result');
+      const result = r.rows[0]?.result || {};
+      // Stats
+      const stats = await client.query(
+        "SELECT count(*)::int AS total, MIN(sale_date) AS min_date, MAX(sale_date) AS max_date FROM sales_data WHERE imported_from_accountedge=true"
+      );
+      // Ensure nightly cron exists (safe to re-run)
+      try {
+        await client.query(`
+          SELECT cron.schedule('refresh-sales-data-nightly','30 5 * * *','SELECT refresh_sales_data_from_pcr();')
+          WHERE NOT EXISTS (SELECT 1 FROM cron.job WHERE jobname='refresh-sales-data-nightly')
+        `);
+      } catch (cronErr) { console.warn('cron schedule skipped:', cronErr.message); }
+      res.json({ success: true, ...result, stats: stats.rows[0] });
+    } catch (e) {
+      console.error('refresh-sales-from-pcr error:', e);
+      res.status(500).json({ success: false, error: e.message });
+    } finally {
+      client.release();
+    }
   });
 
   // ─── CHECK PCR MATCH: check if a lead has a matching PCR shop ───

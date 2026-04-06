@@ -31,7 +31,7 @@ interface ManagedUser {
 
 export default function AdminPage({ user }: Props) {
   const [users, setUsers] = useState<ManagedUser[]>([]);
-  const [activeTab, setActiveTab] = useState<'users' | 'notifications' | 'data' | 'audit'>('users');
+  const [activeTab, setActiveTab] = useState<'users' | 'notifications' | 'data' | 'duplicates' | 'audit'>('users');
   const [showAddUser, setShowAddUser] = useState(false);
   const [newUser, setNewUser] = useState({ email: '', password: '', first_name: '', last_name: '', role: 'rep' });
   const [error, setError] = useState('');
@@ -69,6 +69,63 @@ export default function AdminPage({ user }: Props) {
   // Create salespeople state
   const [createSpRunning, setCreateSpRunning] = useState(false);
   const [createSpResult, setCreateSpResult] = useState<any>(null);
+
+  // Duplicate management state
+  interface DuplicateFlag {
+    id: number; similarity_score: number; status: string; created_at: string;
+    lead_id: number; lead_name: string; lead_city: string | null; lead_phone: string | null; lead_email: string | null; lead_contacts: string | null; lead_note_count: number;
+    active_id: number; active_name: string; active_city: string | null; active_phone: string | null; active_email: string | null; active_contacts: string | null; active_pcr_managed: boolean; active_branch: string | null; active_note_count: number;
+  }
+  const [duplicates, setDuplicates] = useState<DuplicateFlag[]>([]);
+  const [dupeScanning, setDupeScanning] = useState(false);
+  const [dupeScanResult, setDupeScanResult] = useState('');
+  const [dupeLoading, setDupeLoading] = useState(false);
+  const [dupeActionLoading, setDupeActionLoading] = useState<number | null>(null);
+  const [dupeThreshold, setDupeThreshold] = useState('0.95');
+  const [confirmDeleteId, setConfirmDeleteId] = useState<number | null>(null);
+
+  const loadDuplicates = async () => {
+    setDupeLoading(true);
+    try {
+      const data = await api.get('/admin/duplicates');
+      setDuplicates(data.duplicates || []);
+    } catch (err) { console.error(err); }
+    finally { setDupeLoading(false); }
+  };
+
+  const scanDuplicates = async () => {
+    setDupeScanning(true);
+    setDupeScanResult('');
+    try {
+      const data = await api.post('/admin/scan-duplicates', { threshold: parseFloat(dupeThreshold) });
+      setDupeScanResult(`Scan complete: found ${data.count} duplicate(s) across ${data.leadsScanned} leads and ${data.activesScanned} active customers.`);
+      await loadDuplicates();
+    } catch (err: any) {
+      setDupeScanResult(`Error: ${err.error || err.message || 'Scan failed'}`);
+    } finally { setDupeScanning(false); }
+  };
+
+  const deleteLead = async (flagId: number) => {
+    setDupeActionLoading(flagId);
+    try {
+      const data = await api.post(`/admin/duplicates/${flagId}/delete-lead`);
+      showSuccess(data.message || 'Lead deleted and notes transferred.');
+      setConfirmDeleteId(null);
+      await loadDuplicates();
+    } catch (err: any) {
+      showError(err.error || 'Delete failed');
+    } finally { setDupeActionLoading(null); }
+  };
+
+  const dismissDuplicate = async (flagId: number) => {
+    setDupeActionLoading(flagId);
+    try {
+      await api.post(`/admin/duplicates/${flagId}/dismiss`);
+      await loadDuplicates();
+    } catch (err: any) {
+      showError(err.error || 'Dismiss failed');
+    } finally { setDupeActionLoading(null); }
+  };
 
   // Google Drive auto-import state
   interface GDriveStatus { configured: boolean; lastRun: any; cronSchedule: string; folderId: string | null }
@@ -295,6 +352,7 @@ export default function AdminPage({ user }: Props) {
           {[
             { key: 'users', label: 'Users', labelFull: 'User Management' },
             { key: 'notifications', label: 'Alerts', labelFull: 'Notifications' },
+            ...(isAdmin ? [{ key: 'duplicates', label: 'Dupes', labelFull: 'Duplicate Cleanup' }] : []),
             ...(isAdmin ? [{ key: 'data', label: 'Data', labelFull: 'Data Management' }] : []),
             { key: 'audit', label: 'Audit', labelFull: 'Audit Log' }
           ].map(tab => (
@@ -303,6 +361,7 @@ export default function AdminPage({ user }: Props) {
               onClick={() => {
                 setActiveTab(tab.key as any);
                 if (tab.key === 'notifications') loadNotificationSettings();
+                if (tab.key === 'duplicates') loadDuplicates();
                 if (tab.key === 'data') { loadGDriveStatus(); loadImportHistory(); }
               }}
               className={`px-3 sm:px-4 py-2 rounded-lg text-xs sm:text-sm font-medium transition-colors whitespace-nowrap ${
@@ -732,6 +791,137 @@ export default function AdminPage({ user }: Props) {
       )}
 
       {/* ═══ DATA TAB (admin only) ═══ */}
+      {/* ═══ DUPLICATES TAB ═══ */}
+      {activeTab === 'duplicates' && isAdmin && (
+        <div className="space-y-6">
+          {/* Scan Controls */}
+          <div className="card">
+            <h2 className="font-bold text-navy-900 mb-1">Lead / Active Customer Duplicate Scanner</h2>
+            <p className="text-sm text-navy-500 mb-4">
+              Scans for Leads that match an Active Customer from PCR/AccountEdge. Matching leads can be reviewed and deleted, with notes transferred to the active file.
+            </p>
+            <div className="flex flex-col sm:flex-row items-start sm:items-end gap-3 mb-4">
+              <div>
+                <label className="text-xs font-medium text-navy-600 block mb-1">Match Threshold</label>
+                <select value={dupeThreshold} onChange={e => setDupeThreshold(e.target.value)} className="input text-sm w-32">
+                  <option value="1.0">Exact (100%)</option>
+                  <option value="0.95">Very High (95%)</option>
+                  <option value="0.90">High (90%)</option>
+                  <option value="0.85">Medium (85%)</option>
+                </select>
+              </div>
+              <button onClick={scanDuplicates} disabled={dupeScanning} className="btn-primary text-sm">
+                {dupeScanning ? 'Scanning...' : 'Run Duplicate Scan'}
+              </button>
+            </div>
+            {dupeScanResult && (
+              <div className={`text-sm px-4 py-3 rounded-lg border ${
+                dupeScanResult.startsWith('Error') ? 'bg-red-50 text-red-700 border-red-200' : 'bg-green-50 text-green-700 border-green-200'
+              }`}>{dupeScanResult}</div>
+            )}
+          </div>
+
+          {/* Duplicate List */}
+          <div className="card">
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="font-bold text-navy-900">Pending Duplicates ({duplicates.length})</h2>
+              {duplicates.length > 0 && <span className="text-xs text-navy-400">Review each match below</span>}
+            </div>
+
+            {dupeLoading ? (
+              <div className="text-sm text-navy-400 py-4">Loading duplicates...</div>
+            ) : duplicates.length === 0 ? (
+              <div className="text-sm text-navy-400 py-4">No pending duplicates. Run a scan to check for matches.</div>
+            ) : (
+              <div className="space-y-4">
+                {duplicates.map(d => (
+                  <div key={d.id} className="border border-navy-200 rounded-xl p-4">
+                    <div className="flex items-center justify-between mb-3">
+                      <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-semibold ${
+                        d.similarity_score >= 1 ? 'bg-red-100 text-red-800' : d.similarity_score >= 0.95 ? 'bg-orange-100 text-orange-800' : 'bg-yellow-100 text-yellow-800'
+                      }`}>
+                        {d.similarity_score >= 1 ? 'EXACT MATCH' : `${Math.round(d.similarity_score * 100)}% Match`}
+                      </span>
+                      <span className="text-xs text-navy-400">Flagged {new Date(d.created_at).toLocaleDateString()}</span>
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+                      {/* Lead */}
+                      <div className="bg-amber-50 border border-amber-200 rounded-lg p-3">
+                        <div className="flex items-center gap-2 mb-2">
+                          <span className="bg-amber-200 text-amber-800 text-xs font-bold px-2 py-0.5 rounded">LEAD</span>
+                          <span className="text-xs text-navy-400">(will be deleted)</span>
+                        </div>
+                        <p className="font-semibold text-navy-900">{d.lead_name}</p>
+                        {d.lead_city && <p className="text-xs text-navy-500 mt-0.5">{d.lead_city}</p>}
+                        {d.lead_phone && <p className="text-xs text-navy-500">{d.lead_phone}</p>}
+                        {d.lead_email && <p className="text-xs text-navy-500">{d.lead_email}</p>}
+                        {d.lead_contacts && <p className="text-xs text-navy-500">Contacts: {d.lead_contacts}</p>}
+                        <p className="text-xs mt-2 font-medium text-amber-700">{d.lead_note_count} note(s)</p>
+                        <a href={`/accounts/${d.lead_id}`} target="_blank" rel="noreferrer" className="text-xs text-blue-600 hover:underline mt-1 inline-block">View Lead →</a>
+                      </div>
+
+                      {/* Active Customer */}
+                      <div className="bg-green-50 border border-green-200 rounded-lg p-3">
+                        <div className="flex items-center gap-2 mb-2">
+                          <span className="bg-green-200 text-green-800 text-xs font-bold px-2 py-0.5 rounded">ACTIVE (PCR)</span>
+                          <span className="text-xs text-navy-400">(will be kept)</span>
+                        </div>
+                        <p className="font-semibold text-navy-900">{d.active_name}</p>
+                        {d.active_city && <p className="text-xs text-navy-500 mt-0.5">{d.active_city}</p>}
+                        {d.active_phone && <p className="text-xs text-navy-500">{d.active_phone}</p>}
+                        {d.active_email && <p className="text-xs text-navy-500">{d.active_email}</p>}
+                        {d.active_contacts && <p className="text-xs text-navy-500">Contacts: {d.active_contacts}</p>}
+                        {d.active_branch && <p className="text-xs text-navy-500">Branch: {d.active_branch}</p>}
+                        <p className="text-xs mt-2 font-medium text-green-700">{d.active_note_count} note(s)</p>
+                        <a href={`/accounts/${d.active_id}`} target="_blank" rel="noreferrer" className="text-xs text-blue-600 hover:underline mt-1 inline-block">View Active File →</a>
+                      </div>
+                    </div>
+
+                    {/* Actions */}
+                    <div className="flex items-center gap-2 pt-2 border-t border-navy-100">
+                      {confirmDeleteId === d.id ? (
+                        <div className="flex items-center gap-2 w-full">
+                          <p className="text-xs text-red-700 font-medium flex-1">
+                            Confirm: Delete lead &quot;{d.lead_name}&quot; and transfer {d.lead_note_count} note(s) to active file?
+                          </p>
+                          <button
+                            onClick={() => deleteLead(d.id)}
+                            disabled={dupeActionLoading === d.id}
+                            className="px-3 py-1.5 text-xs font-semibold bg-red-600 text-white rounded-lg hover:bg-red-700 disabled:opacity-50"
+                          >
+                            {dupeActionLoading === d.id ? 'Deleting...' : 'Yes, Delete Lead'}
+                          </button>
+                          <button onClick={() => setConfirmDeleteId(null)} className="px-3 py-1.5 text-xs text-navy-600 hover:text-navy-800">Cancel</button>
+                        </div>
+                      ) : (
+                        <>
+                          <button
+                            onClick={() => setConfirmDeleteId(d.id)}
+                            disabled={dupeActionLoading === d.id}
+                            className="px-3 py-1.5 text-xs font-semibold bg-red-100 text-red-700 rounded-lg hover:bg-red-200 disabled:opacity-50"
+                          >
+                            Delete Lead & Transfer Notes
+                          </button>
+                          <button
+                            onClick={() => dismissDuplicate(d.id)}
+                            disabled={dupeActionLoading === d.id}
+                            className="px-3 py-1.5 text-xs text-navy-500 hover:text-navy-700 hover:bg-navy-100 rounded-lg"
+                          >
+                            {dupeActionLoading === d.id ? 'Dismissing...' : 'Not a Duplicate'}
+                          </button>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ═══ DATA TAB ═══ */}
       {activeTab === 'data' && isAdmin && (
         <div className="space-y-6">
 

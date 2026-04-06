@@ -1832,6 +1832,106 @@ async function startServer() {
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
 
+  // ─── DUPLICATE DETECTION: Scan for Lead/Active matches ───
+  app.post('/api/admin/scan-duplicates', authenticate, async (req, res) => {
+    if (req.user.role !== 'admin' && req.user.role !== 'manager') return res.status(403).json({ error: 'Admin or manager only' });
+    try {
+      const threshold = parseFloat(req.body.threshold) || 0.95;
+      // Get all leads
+      const leads = await queryAll(
+        "SELECT id, shop_name, city, phone, email, contact_names FROM accounts WHERE account_category = 'lead' AND deleted_at IS NULL ORDER BY shop_name"
+      );
+      // Get all active customers
+      const actives = await queryAll(
+        "SELECT id, shop_name, city, phone, email, contact_names, pcr_managed, branch FROM accounts WHERE account_category = 'customer' AND deleted_at IS NULL ORDER BY shop_name"
+      );
+      const duplicates = [];
+      for (const lead of leads) {
+        for (const active of actives) {
+          const score = similarity(lead.shop_name, active.shop_name);
+          if (score >= threshold) {
+            // Check if already flagged
+            const existing = await queryOne(
+              'SELECT id FROM duplicate_flags WHERE ((account_1_id=$1 AND account_2_id=$2) OR (account_1_id=$2 AND account_2_id=$1)) AND status=$3',
+              [lead.id, active.id, 'pending']
+            );
+            if (!existing) {
+              await execute(
+                'INSERT INTO duplicate_flags (account_1_id, account_2_id, similarity_score, status) VALUES ($1, $2, $3, $4)',
+                [lead.id, active.id, score, 'pending']
+              );
+            }
+            duplicates.push({
+              lead: { id: lead.id, shop_name: lead.shop_name, city: lead.city, phone: lead.phone, email: lead.email, contact_names: lead.contact_names },
+              active: { id: active.id, shop_name: active.shop_name, city: active.city, phone: active.phone, email: active.email, contact_names: active.contact_names, pcr_managed: active.pcr_managed, branch: active.branch },
+              score
+            });
+          }
+        }
+      }
+      duplicates.sort((a, b) => b.score - a.score);
+      res.json({ success: true, count: duplicates.length, duplicates, leadsScanned: leads.length, activesScanned: actives.length });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
+  // Get all pending duplicate flags
+  app.get('/api/admin/duplicates', authenticate, async (req, res) => {
+    if (req.user.role !== 'admin' && req.user.role !== 'manager') return res.status(403).json({ error: 'Admin or manager only' });
+    try {
+      const flags = await queryAll(`
+        SELECT df.id, df.similarity_score, df.status, df.created_at,
+          a1.id as lead_id, a1.shop_name as lead_name, a1.city as lead_city, a1.phone as lead_phone, a1.email as lead_email, a1.contact_names as lead_contacts,
+          a2.id as active_id, a2.shop_name as active_name, a2.city as active_city, a2.phone as active_phone, a2.email as active_email, a2.contact_names as active_contacts,
+          a2.pcr_managed as active_pcr_managed, a2.branch as active_branch,
+          (SELECT COUNT(*) FROM notes WHERE account_id = a1.id) as lead_note_count,
+          (SELECT COUNT(*) FROM notes WHERE account_id = a2.id) as active_note_count
+        FROM duplicate_flags df
+        JOIN accounts a1 ON df.account_1_id = a1.id
+        JOIN accounts a2 ON df.account_2_id = a2.id
+        WHERE df.status = 'pending' AND a1.deleted_at IS NULL AND a2.deleted_at IS NULL
+        ORDER BY df.similarity_score DESC, df.created_at DESC
+      `);
+      res.json({ duplicates: flags });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
+  // Admin: approve deletion of a lead duplicate (soft-delete lead, transfer notes first)
+  app.post('/api/admin/duplicates/:flagId/delete-lead', authenticate, async (req, res) => {
+    if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
+    try {
+      const flag = await queryOne('SELECT * FROM duplicate_flags WHERE id=$1', [req.params.flagId]);
+      if (!flag) return res.status(404).json({ error: 'Flag not found' });
+      const leadId = flag.account_1_id;
+      const activeId = flag.account_2_id;
+      // Transfer any remaining notes from lead to active
+      const leadNotes = await queryAll('SELECT * FROM notes WHERE account_id=$1 ORDER BY created_at', [leadId]);
+      const lead = await queryOne('SELECT shop_name FROM accounts WHERE id=$1', [leadId]);
+      let transferred = 0;
+      for (const note of leadNotes) {
+        await execute(
+          'INSERT INTO notes (account_id, created_by_id, content, is_voice_transcribed, created_at) VALUES ($1, $2, $3, $4, $5)',
+          [activeId, note.created_by_id, `[Transferred from Lead "${lead?.shop_name || 'Unknown'}"] ${note.content}`, note.is_voice_transcribed, note.created_at]
+        );
+        transferred++;
+      }
+      // Soft-delete the lead
+      await execute('UPDATE accounts SET deleted_at = NOW() WHERE id = $1', [leadId]);
+      // Mark flag as merged
+      await execute("UPDATE duplicate_flags SET status = 'merged', resolved_at = NOW() WHERE id = $1", [req.params.flagId]);
+      await logAudit(req, 'account', leadId, 'delete', { reason: 'duplicate_merge', merged_into: activeId, notes_transferred: transferred });
+      res.json({ success: true, message: `Lead "${lead?.shop_name}" deleted. ${transferred} note(s) transferred to active customer.`, notesTransferred: transferred });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
+  // Admin: dismiss a duplicate flag (not actually duplicate)
+  app.post('/api/admin/duplicates/:flagId/dismiss', authenticate, async (req, res) => {
+    if (req.user.role !== 'admin' && req.user.role !== 'manager') return res.status(403).json({ error: 'Admin or manager only' });
+    try {
+      await execute("UPDATE duplicate_flags SET status = 'dismissed', resolved_at = NOW() WHERE id = $1", [req.params.flagId]);
+      res.json({ success: true });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
   // Serve frontend
   const frontendPath = path.join(__dirname, '../frontend/dist');
   app.use(express.static(frontendPath));

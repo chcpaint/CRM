@@ -337,7 +337,30 @@ async function startServer() {
     try {
       const existing = await queryOne('SELECT * FROM accounts WHERE id=$1 AND deleted_at IS NULL', [req.params.id]);
       if (!existing) return res.status(404).json({ error: 'Not found' });
-      const fields = ['shop_name','address','city','area','province','contact_names','phone','email','account_type','assigned_rep_id','status','suppliers','paint_line','allied_products','sundries','has_contract','mpo','num_techs','sq_footage','annual_revenue','former_sherwin_client','follow_up_date','tags','account_category','branch','postal_code','phone2','num_painters','num_body_men','num_paint_booths','cup_brand','paper_brand','filler_brand','contract_status','deal_details','banner','business_types','business_type_notes','contract_file_path','contract_expiration_date','secondary_rep_id','phone_numbers','email_addresses'];
+
+      // ─── PCR Guard: prevent manual promotion to Active Customer ───
+      // Active customers are controlled by the AccountEdge/PCR file.
+      // Staff must be warned that only shops in the PCR report become active.
+      const isPromotingToActive = (
+        (req.body.status === 'active' && existing.status !== 'active') ||
+        (req.body.account_category === 'customer' && existing.account_category !== 'customer')
+      );
+      if (isPromotingToActive && existing.pcr_managed !== true) {
+        // Check if a PCR shop exists with a matching name
+        const pcrMatch = await queryOne(
+          "SELECT shop_name, branch FROM pcr_shop_list WHERE LOWER(shop_name) = LOWER($1) LIMIT 1",
+          [existing.shop_name]
+        );
+        if (!pcrMatch) {
+          return res.status(400).json({
+            error: 'pcr_required',
+            message: 'Active customers and clients are managed through the AccountEdge/PCR file. This shop is not in the PCR report. Only shops that appear in the PCR data from AccountEdge can be set to Active Customer status. If this shop should be active, it needs to be added in AccountEdge first — the PCR sync will then bring it into the CRM as an active customer automatically.',
+            shop_name: existing.shop_name
+          });
+        }
+      }
+
+      const fields = ['shop_name','address','city','area','province','contact_names','phone','email','account_type','assigned_rep_id','status','suppliers','paint_line','allied_products','sundries','has_contract','mpo','num_techs','sq_footage','annual_revenue','former_sherwin_client','follow_up_date','tags','account_category','branch','postal_code','phone2','num_painters','num_body_men','num_paint_booths','cup_brand','paper_brand','filler_brand','contract_status','deal_details','banner','business_types','business_type_notes','contract_file_path','contract_expiration_date','secondary_rep_id','phone_numbers','email_addresses','pcr_managed','pcr_shop_name'];
       // If phone_numbers is provided, auto-sync the primary number into `phone` for backward compat
       if (req.body.phone_numbers) {
         try {
@@ -1591,6 +1614,224 @@ async function startServer() {
     }
   });
 
+  // ─── PCR SYNC: Sync active customers from pcr_shop_list (AccountEdge/PCR source of truth) ───
+  // This reads pcr_shop_list from the same Supabase Postgres DB and creates/updates accounts
+  async function syncPCRCustomers() {
+    try {
+      // Check if pcr_shop_list table exists
+      const tableExists = await queryOne(
+        "SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_name = 'pcr_shop_list') as exists"
+      );
+      if (!tableExists?.exists) {
+        console.log('  PCR sync: pcr_shop_list table not found, skipping');
+        return { synced: 0, created: 0, updated: 0 };
+      }
+
+      const pcrShops = await queryAll('SELECT DISTINCT shop_name, branch FROM pcr_shop_list WHERE shop_name IS NOT NULL ORDER BY shop_name');
+      if (!pcrShops || pcrShops.length === 0) {
+        console.log('  PCR sync: no shops in pcr_shop_list');
+        return { synced: 0, created: 0, updated: 0 };
+      }
+
+      let created = 0, updated = 0, skipped = 0;
+      for (const shop of pcrShops) {
+        try {
+          const existing = await queryOne(
+            'SELECT id, account_category, status, pcr_managed FROM accounts WHERE LOWER(shop_name) = LOWER($1) AND deleted_at IS NULL',
+            [shop.shop_name]
+          );
+          if (existing) {
+            // Update existing: mark as PCR-managed, set to customer/active if not already
+            const updates = ["pcr_managed = true", "pcr_shop_name = $1"];
+            const params = [shop.shop_name];
+            let idx = 2;
+            if (existing.account_category !== 'customer') {
+              updates.push("account_category = 'customer'");
+            }
+            if (existing.status !== 'active') {
+              updates.push("status = 'active'");
+            }
+            if (shop.branch) {
+              updates.push(`branch = COALESCE(NULLIF(branch,''), $${idx++})`);
+              params.push(shop.branch);
+            }
+            params.push(existing.id);
+            await execute(`UPDATE accounts SET ${updates.join(', ')}, updated_at = NOW() WHERE id = $${idx}`, params);
+            updated++;
+          } else {
+            // Create new active customer from PCR
+            await execute(
+              `INSERT INTO accounts (shop_name, branch, account_category, status, pcr_managed, pcr_shop_name) VALUES ($1, $2, 'customer', 'active', true, $1)`,
+              [shop.shop_name, shop.branch || null]
+            );
+            created++;
+          }
+        } catch (err) {
+          skipped++;
+        }
+      }
+
+      // Also mark any current "customers" NOT in PCR as churned (they left AccountEdge)
+      // But only if they were originally PCR-managed
+      const pcrNames = pcrShops.map(s => s.shop_name.toLowerCase());
+      const currentPCRCustomers = await queryAll(
+        "SELECT id, shop_name FROM accounts WHERE pcr_managed = true AND account_category = 'customer' AND status = 'active' AND deleted_at IS NULL"
+      );
+      let churned = 0;
+      for (const cust of currentPCRCustomers) {
+        if (!pcrNames.includes(cust.shop_name.toLowerCase())) {
+          await execute("UPDATE accounts SET status = 'churned', updated_at = NOW() WHERE id = $1", [cust.id]);
+          churned++;
+        }
+      }
+
+      return { synced: pcrShops.length, created, updated, skipped, churned };
+    } catch (err) {
+      console.error('  PCR sync error:', err.message);
+      return { error: err.message };
+    }
+  }
+
+  // Admin endpoint to trigger PCR customer sync manually
+  app.post('/api/admin/sync-pcr-customers', authenticate, async (req, res) => {
+    if (req.user.role !== 'admin' && req.user.role !== 'manager') return res.status(403).json({ error: 'Admin or manager only' });
+    try {
+      const result = await syncPCRCustomers();
+      res.json({ success: true, ...result });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
+  // ─── CHECK PCR MATCH: check if a lead has a matching PCR shop ───
+  app.get('/api/accounts/:id/pcr-match', authenticate, async (req, res) => {
+    try {
+      const account = await queryOne('SELECT shop_name FROM accounts WHERE id=$1 AND deleted_at IS NULL', [req.params.id]);
+      if (!account) return res.status(404).json({ error: 'Not found' });
+
+      const pcrMatch = await queryOne(
+        "SELECT shop_name, branch FROM pcr_shop_list WHERE LOWER(shop_name) = LOWER($1) LIMIT 1",
+        [account.shop_name]
+      );
+
+      // Also check for fuzzy matches (partial name)
+      let fuzzyMatches = [];
+      if (!pcrMatch) {
+        const words = account.shop_name.split(/\s+/).filter(w => w.length > 2);
+        if (words.length > 0) {
+          const pattern = words.map(w => w.replace(/[%_]/g, '')).join('%');
+          fuzzyMatches = await queryAll(
+            "SELECT DISTINCT shop_name, branch FROM pcr_shop_list WHERE LOWER(shop_name) LIKE LOWER($1) LIMIT 10",
+            [`%${pattern}%`]
+          );
+        }
+      }
+
+      res.json({
+        exact_match: pcrMatch || null,
+        fuzzy_matches: fuzzyMatches,
+        is_in_pcr: !!pcrMatch
+      });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
+  // ─── FIND MATCHING ACTIVE ACCOUNT for note transfer ───
+  app.get('/api/accounts/:id/find-active-match', authenticate, async (req, res) => {
+    try {
+      const account = await queryOne('SELECT id, shop_name, account_category FROM accounts WHERE id=$1 AND deleted_at IS NULL', [req.params.id]);
+      if (!account) return res.status(404).json({ error: 'Not found' });
+
+      // Find matching active customer account (PCR-imported)
+      let match = await queryOne(
+        "SELECT id, shop_name, branch, account_category, pcr_managed FROM accounts WHERE LOWER(shop_name) = LOWER($1) AND account_category = 'customer' AND deleted_at IS NULL AND id != $2",
+        [account.shop_name, account.id]
+      );
+
+      // If no exact match, try PCR shop name
+      if (!match) {
+        match = await queryOne(
+          "SELECT id, shop_name, branch, account_category, pcr_managed FROM accounts WHERE LOWER(pcr_shop_name) = LOWER($1) AND account_category = 'customer' AND deleted_at IS NULL AND id != $2",
+          [account.shop_name, account.id]
+        );
+      }
+
+      res.json({ match: match || null });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
+  // ─── TRANSFER NOTES from one account to another ───
+  app.post('/api/accounts/:id/transfer-notes', authenticate, async (req, res) => {
+    try {
+      const { target_account_id, note_ids } = req.body;
+      if (!target_account_id) return res.status(400).json({ error: 'target_account_id required' });
+
+      const source = await queryOne('SELECT id, shop_name FROM accounts WHERE id=$1 AND deleted_at IS NULL', [req.params.id]);
+      const target = await queryOne('SELECT id, shop_name, account_category FROM accounts WHERE id=$1 AND deleted_at IS NULL', [target_account_id]);
+      if (!source || !target) return res.status(404).json({ error: 'Source or target account not found' });
+
+      let transferred = 0;
+      if (note_ids && Array.isArray(note_ids) && note_ids.length > 0) {
+        // Transfer specific notes
+        for (const noteId of note_ids) {
+          await execute('UPDATE notes SET account_id = $1, updated_at = NOW() WHERE id = $2 AND account_id = $3', [target_account_id, noteId, req.params.id]);
+          transferred++;
+        }
+      } else {
+        // Transfer ALL notes from source to target
+        const result = await execute('UPDATE notes SET account_id = $1, updated_at = NOW() WHERE account_id = $2', [target_account_id, req.params.id]);
+        transferred = result.changes;
+      }
+
+      // Log the transfer
+      await logAudit(req, 'account', parseInt(req.params.id), 'update', {
+        notes_transferred: { from: source.shop_name, to: target.shop_name, count: transferred }
+      });
+
+      res.json({
+        success: true,
+        transferred,
+        message: `${transferred} note(s) moved from "${source.shop_name}" (Lead) to "${target.shop_name}" (Active Customer from PCR/AccountEdge)`
+      });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
+  // ─── COPY NOTES (duplicate, don't move) from one account to another ───
+  app.post('/api/accounts/:id/copy-notes', authenticate, async (req, res) => {
+    try {
+      const { target_account_id, note_ids } = req.body;
+      if (!target_account_id) return res.status(400).json({ error: 'target_account_id required' });
+
+      const source = await queryOne('SELECT id, shop_name FROM accounts WHERE id=$1 AND deleted_at IS NULL', [req.params.id]);
+      const target = await queryOne('SELECT id, shop_name FROM accounts WHERE id=$1 AND deleted_at IS NULL', [target_account_id]);
+      if (!source || !target) return res.status(404).json({ error: 'Source or target account not found' });
+
+      // Get notes to copy
+      let notes;
+      if (note_ids && Array.isArray(note_ids) && note_ids.length > 0) {
+        notes = await queryAll('SELECT * FROM notes WHERE id = ANY($1) AND account_id = $2', [note_ids, req.params.id]);
+      } else {
+        notes = await queryAll('SELECT * FROM notes WHERE account_id = $1 ORDER BY created_at', [req.params.id]);
+      }
+
+      let copied = 0;
+      for (const note of notes) {
+        await execute(
+          'INSERT INTO notes (account_id, created_by_id, content, is_voice_transcribed, created_at) VALUES ($1, $2, $3, $4, $5)',
+          [target_account_id, note.created_by_id, `[Copied from Lead "${source.shop_name}"]\n\n${note.content}`, note.is_voice_transcribed, note.created_at]
+        );
+        copied++;
+      }
+
+      await logAudit(req, 'account', parseInt(req.params.id), 'update', {
+        notes_copied: { from: source.shop_name, to: target.shop_name, count: copied }
+      });
+
+      res.json({
+        success: true,
+        copied,
+        message: `${copied} note(s) copied from "${source.shop_name}" (Lead) to "${target.shop_name}" (Active Customer from PCR/AccountEdge)`
+      });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
   // Serve frontend
   const frontendPath = path.join(__dirname, '../frontend/dist');
   app.use(express.static(frontendPath));
@@ -1601,67 +1842,37 @@ async function startServer() {
     console.log(`  Server running on http://localhost:${PORT}`);
     console.log(`  Database: Supabase PostgreSQL\n`);
 
-    // Auto-seed customers on first startup if none exist
+    // PCR Sync: sync active customers from pcr_shop_list on every startup
     try {
-      const customerCount = await queryOne("SELECT COUNT(*) as count FROM accounts WHERE account_category = 'customer' AND deleted_at IS NULL");
-      if (parseInt(customerCount?.count) === 0) {
-        console.log('  No active customers found — auto-seeding from AccountEdge exports...');
-        const customers = require('./src/customer-seed.json');
-        let imported = 0;
-        for (const c of customers) {
-          try {
-            const existing = await queryOne(
-              'SELECT id FROM accounts WHERE LOWER(shop_name) = LOWER($1) AND deleted_at IS NULL',
-              [c.shop_name]
-            );
-            if (existing) {
-              // Existing lead — upgrade to customer and fill missing data
-              const updates = ["account_category = 'customer'"];
-              const params = [];
-              let idx = 1;
-              if (c.branch) { updates.push(`branch = $${idx++}`); params.push(c.branch); }
-              if (c.address) { updates.push(`address = COALESCE(NULLIF(address,''), $${idx++})`); params.push(c.address); }
-              if (c.city) { updates.push(`city = COALESCE(NULLIF(city,''), $${idx++})`); params.push(c.city); }
-              if (c.province) { updates.push(`province = COALESCE(NULLIF(province,''), $${idx++})`); params.push(c.province); }
-              if (c.postal_code) { updates.push(`postal_code = COALESCE(postal_code, $${idx++})`); params.push(c.postal_code); }
-              if (c.phone) { updates.push(`phone = COALESCE(NULLIF(phone,''), $${idx++})`); params.push(c.phone); }
-              if (c.phone2) { updates.push(`phone2 = COALESCE(phone2, $${idx++})`); params.push(c.phone2); }
-              if (c.email) { updates.push(`email = COALESCE(NULLIF(email,''), $${idx++})`); params.push(c.email); }
-              if (c.contact_names) { updates.push(`contact_names = COALESCE(NULLIF(contact_names,''), $${idx++})`); params.push(c.contact_names); }
-              params.push(existing.id);
-              await execute(`UPDATE accounts SET ${updates.join(', ')}, updated_at = NOW() WHERE id = $${idx}`, params);
-            } else {
-              await execute(
-                `INSERT INTO accounts (shop_name, address, city, province, postal_code, phone, phone2, email, contact_names, branch, account_category, status) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'customer','active')`,
-                [c.shop_name, c.address, c.city, c.province, c.postal_code, c.phone, c.phone2, c.email, c.contact_names, c.branch]
-              );
-            }
-            imported++;
-          } catch (err) { /* skip individual errors */ }
-        }
-
-        // Link sales_data to newly created customer accounts
-        const unlinked = await queryAll(
-          'SELECT DISTINCT customer_name FROM sales_data WHERE account_id IS NULL AND customer_name IS NOT NULL'
-        );
-        let linked = 0;
-        for (const row of unlinked) {
-          const match = await queryOne(
-            'SELECT id FROM accounts WHERE LOWER(shop_name) = LOWER($1) AND deleted_at IS NULL',
-            [row.customer_name]
-          );
-          if (match) {
-            await execute('UPDATE sales_data SET account_id = $1 WHERE LOWER(customer_name) = LOWER($2) AND account_id IS NULL', [match.id, row.customer_name]);
-            linked++;
-          }
-        }
-
-        console.log(`  Auto-seed complete: ${imported} customers imported, ${linked} sales records linked`);
+      console.log('  Syncing active customers from PCR/AccountEdge shop list...');
+      const pcrResult = await syncPCRCustomers();
+      if (pcrResult.error) {
+        console.log(`  PCR sync warning: ${pcrResult.error}`);
       } else {
-        console.log(`  Active customers: ${customerCount.count} (seed not needed)`);
+        console.log(`  PCR sync: ${pcrResult.synced} shops checked, ${pcrResult.created} created, ${pcrResult.updated} updated${pcrResult.churned ? `, ${pcrResult.churned} churned` : ''}`);
       }
+
+      // Also link unlinked sales_data to accounts
+      const unlinked = await queryAll(
+        'SELECT DISTINCT customer_name FROM sales_data WHERE account_id IS NULL AND customer_name IS NOT NULL'
+      );
+      let linked = 0;
+      for (const row of unlinked) {
+        const match = await queryOne(
+          'SELECT id FROM accounts WHERE LOWER(shop_name) = LOWER($1) AND deleted_at IS NULL',
+          [row.customer_name]
+        );
+        if (match) {
+          await execute('UPDATE sales_data SET account_id = $1 WHERE LOWER(customer_name) = LOWER($2) AND account_id IS NULL', [match.id, row.customer_name]);
+          linked++;
+        }
+      }
+      if (linked > 0) console.log(`  Linked ${linked} orphan sales records to accounts`);
+
+      const customerCount = await queryOne("SELECT COUNT(*) as count FROM accounts WHERE account_category = 'customer' AND deleted_at IS NULL");
+      console.log(`  Active customers: ${customerCount.count} (controlled by PCR/AccountEdge)`);
     } catch (err) {
-      console.error('  Auto-seed warning:', err.message);
+      console.error('  PCR sync warning:', err.message);
     }
   });
 }

@@ -57,6 +57,25 @@ export default function AccountDetailPage({ user }: Props) {
   // Auto-log toast
   const [autoLogToast, setAutoLogToast] = useState('');
 
+  // PCR guard modal
+  const [pcrWarning, setPcrWarning] = useState<string | null>(null);
+  // Note transfer
+  const [activeMatch, setActiveMatch] = useState<{id: number; shop_name: string; branch: string | null; pcr_managed: boolean} | null>(null);
+  const [transferring, setTransferring] = useState(false);
+  const [transferResult, setTransferResult] = useState<string | null>(null);
+  const [selectedNotesForTransfer, setSelectedNotesForTransfer] = useState<number[]>([]);
+  const [showTransferModal, setShowTransferModal] = useState(false);
+  const [transferMode, setTransferMode] = useState<'copy' | 'move'>('copy');
+
+  // Check for matching active customer when viewing a lead
+  useEffect(() => {
+    if (account && account.account_category === 'lead') {
+      api.get(`/accounts/${account.id}/find-active-match`).then(data => {
+        if (data.match) setActiveMatch(data.match);
+      }).catch(() => {});
+    }
+  }, [account?.id, account?.account_category]);
+
   // Edit note
   const [editingNoteId, setEditingNoteId] = useState<number | null>(null);
   const [editNoteContent, setEditNoteContent] = useState('');
@@ -191,9 +210,18 @@ export default function AccountDetailPage({ user }: Props) {
         email_addresses: JSON.stringify(editEmails),
       });
       setEditing(false);
+      setPcrWarning(null);
       loadAccount();
-    } catch (err) {
-      console.error(err);
+    } catch (err: any) {
+      // Check for PCR guard error
+      if (err?.response?.error === 'pcr_required' || err?.error === 'pcr_required') {
+        const msg = err?.response?.message || err?.message || 'Active customers are managed through the AccountEdge/PCR file.';
+        setPcrWarning(msg);
+        // Reset status back so user isn't stuck
+        setEditForm(f => ({...f, status: account?.status, account_category: account?.account_category}));
+      } else {
+        console.error(err);
+      }
     }
   };
 
@@ -339,9 +367,19 @@ export default function AccountDetailPage({ user }: Props) {
               </div>
               <div>
                 <label className="block text-xs text-navy-500 mb-1">Status</label>
-                <select className="input-field" value={editForm.status || 'prospect'} onChange={e => setEditForm(f => ({...f, status: e.target.value as StatusType}))}>
+                <select className="input-field" value={editForm.status || 'prospect'} onChange={e => {
+                  const newStatus = e.target.value as StatusType;
+                  if (newStatus === 'active' && account?.status !== 'active' && !account?.pcr_managed) {
+                    setPcrWarning('Active Customer status is controlled by the AccountEdge/PCR report. Shops become Active Customers automatically when they appear in the PCR data from AccountEdge. If this shop should be active, it needs to be added in AccountEdge first.');
+                    return;
+                  }
+                  setEditForm(f => ({...f, status: newStatus}));
+                }}>
                   {Object.entries(STATUS_LABELS).map(([v, l]) => <option key={v} value={v}>{l}</option>)}
                 </select>
+                {account?.account_category === 'lead' && (
+                  <p className="text-xs text-navy-400 mt-1">Active Customer status is set by PCR/AccountEdge</p>
+                )}
               </div>
               <div>
                 <label className="block text-xs text-navy-500 mb-1">Branch</label>
@@ -536,6 +574,168 @@ export default function AccountDetailPage({ user }: Props) {
           </div>
         )}
       </div>
+
+      {/* PCR Warning Modal */}
+      {pcrWarning && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-2xl shadow-xl max-w-lg w-full p-6">
+            <div className="flex items-start gap-3 mb-4">
+              <div className="w-10 h-10 rounded-full bg-amber-100 flex items-center justify-center flex-shrink-0">
+                <svg className="w-5 h-5 text-amber-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4.5c-.77-.833-2.694-.833-3.464 0L3.34 16.5c-.77.833.192 2.5 1.732 2.5z" />
+                </svg>
+              </div>
+              <div>
+                <h3 className="font-bold text-navy-900 text-lg">Active Customers Controlled by PCR/AccountEdge</h3>
+                <p className="text-navy-600 text-sm mt-2">{pcrWarning}</p>
+                <p className="text-navy-500 text-sm mt-3">
+                  Your CRM notes on this Lead will need to be moved to the active file once this shop appears in the PCR/AccountEdge report. Use the "Transfer Notes" feature to copy your notes over.
+                </p>
+              </div>
+            </div>
+            <div className="flex justify-end">
+              <button onClick={() => setPcrWarning(null)} className="btn-primary">Got it</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Note Transfer Banner — shown on Leads that have a matching Active Customer from PCR */}
+      {account.account_category === 'lead' && activeMatch && (
+        <div className="card mb-4 sm:mb-6 border-l-4 border-blue-500 bg-blue-50">
+          <div className="flex flex-col sm:flex-row sm:items-center gap-3">
+            <div className="flex-1">
+              <p className="font-semibold text-blue-900">This Lead has a matching Active Customer from PCR/AccountEdge</p>
+              <p className="text-sm text-blue-700 mt-1">
+                "<strong>{activeMatch.shop_name}</strong>" exists as an active customer imported from the AccountEdge PCR report
+                {activeMatch.branch ? ` (${activeMatch.branch} branch)` : ''}.
+                You can copy or move your CRM notes from this Lead file to the active customer file.
+              </p>
+            </div>
+            <div className="flex gap-2">
+              <button
+                onClick={() => navigate(`/accounts/${activeMatch.id}`)}
+                className="btn-secondary text-sm whitespace-nowrap"
+              >
+                View Active File
+              </button>
+              <button
+                onClick={() => { setShowTransferModal(true); setSelectedNotesForTransfer([]); }}
+                className="btn-primary text-sm whitespace-nowrap"
+              >
+                Transfer Notes
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Note Transfer Modal */}
+      {showTransferModal && activeMatch && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-2xl shadow-xl max-w-2xl w-full p-6 max-h-[80vh] overflow-y-auto">
+            <h3 className="font-bold text-navy-900 text-lg mb-2">Transfer Notes to Active Customer</h3>
+            <p className="text-sm text-navy-600 mb-4">
+              {transferMode === 'copy' ? 'Copy' : 'Move'} notes from this Lead to "<strong>{activeMatch.shop_name}</strong>" (PCR/AccountEdge active customer).
+            </p>
+
+            <div className="flex gap-2 mb-4">
+              <button
+                onClick={() => setTransferMode('copy')}
+                className={`px-3 py-1.5 rounded-lg text-sm font-medium ${transferMode === 'copy' ? 'bg-blue-100 text-blue-700 border border-blue-300' : 'bg-navy-50 text-navy-600 border border-navy-200'}`}
+              >
+                Copy (keep originals)
+              </button>
+              <button
+                onClick={() => setTransferMode('move')}
+                className={`px-3 py-1.5 rounded-lg text-sm font-medium ${transferMode === 'move' ? 'bg-blue-100 text-blue-700 border border-blue-300' : 'bg-navy-50 text-navy-600 border border-navy-200'}`}
+              >
+                Move (remove from Lead)
+              </button>
+            </div>
+
+            {notes.length === 0 ? (
+              <p className="text-navy-500 text-sm py-4">No notes to transfer.</p>
+            ) : (
+              <div className="space-y-2 mb-4">
+                <label className="flex items-center gap-2 text-sm font-medium text-navy-700 mb-2">
+                  <input
+                    type="checkbox"
+                    checked={selectedNotesForTransfer.length === notes.length}
+                    onChange={e => setSelectedNotesForTransfer(e.target.checked ? notes.map(n => n.id) : [])}
+                    className="rounded"
+                  />
+                  Select all ({notes.length} notes)
+                </label>
+                {notes.map(note => (
+                  <label key={note.id} className="flex items-start gap-2 p-2 rounded-lg bg-navy-50 cursor-pointer hover:bg-navy-100">
+                    <input
+                      type="checkbox"
+                      checked={selectedNotesForTransfer.includes(note.id)}
+                      onChange={e => {
+                        if (e.target.checked) setSelectedNotesForTransfer(prev => [...prev, note.id]);
+                        else setSelectedNotesForTransfer(prev => prev.filter(id => id !== note.id));
+                      }}
+                      className="rounded mt-1"
+                    />
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm text-navy-800 line-clamp-2">{note.content}</p>
+                      <p className="text-xs text-navy-500 mt-1">
+                        {note.first_name} {note.last_name} &middot; {new Date(note.created_at).toLocaleDateString()}
+                      </p>
+                    </div>
+                  </label>
+                ))}
+              </div>
+            )}
+
+            {transferResult && (
+              <div className="p-3 rounded-lg bg-green-50 border border-green-200 text-green-800 text-sm mb-4">
+                {transferResult}
+              </div>
+            )}
+
+            <div className="flex justify-end gap-2">
+              <button onClick={() => { setShowTransferModal(false); setTransferResult(null); }} className="btn-secondary">
+                {transferResult ? 'Done' : 'Cancel'}
+              </button>
+              {!transferResult && (
+                <button
+                  onClick={async () => {
+                    setTransferring(true);
+                    try {
+                      const endpoint = transferMode === 'copy' ? 'copy-notes' : 'transfer-notes';
+                      const body: any = { target_account_id: activeMatch.id };
+                      if (selectedNotesForTransfer.length > 0 && selectedNotesForTransfer.length < notes.length) {
+                        body.note_ids = selectedNotesForTransfer;
+                      }
+                      const result = await api.post(`/accounts/${id}/${endpoint}`, body);
+                      setTransferResult(result.message);
+                      loadAccount(); // Refresh notes
+                    } catch (err) {
+                      setTransferResult('Error transferring notes. Please try again.');
+                    }
+                    setTransferring(false);
+                  }}
+                  disabled={transferring || (notes.length > 0 && selectedNotesForTransfer.length === 0)}
+                  className="btn-primary"
+                >
+                  {transferring ? 'Transferring...' : `${transferMode === 'copy' ? 'Copy' : 'Move'} ${selectedNotesForTransfer.length || 'All'} Note(s)`}
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* PCR Managed Badge — shown on active customers controlled by PCR */}
+      {account.pcr_managed && (
+        <div className="card mb-4 sm:mb-6 border-l-4 border-green-500 bg-green-50">
+          <p className="text-sm text-green-800">
+            <strong>PCR/AccountEdge Managed</strong> — This active customer file is kept in sync with the AccountEdge PCR report. Status changes are controlled by the PCR data.
+          </p>
+        </div>
+      )}
 
       {/* Shop Details — full width */}
       <div className="mb-4 sm:mb-6">

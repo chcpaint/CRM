@@ -69,6 +69,8 @@ export interface Account {
   business_type_notes: string | null;
   contract_file_path: string | null;
   contract_expiration_date: string | null;
+  pcr_managed: boolean;
+  pcr_shop_name: string | null;
   created_at: string;
   updated_at: string;
 }

@@ -279,6 +279,18 @@ DO $$ BEGIN
 EXCEPTION WHEN duplicate_column THEN NULL;
 END $$;
 
+-- PCR-managed flag: true when account was created/promoted by PCR sync (not manually)
+DO $$ BEGIN
+  ALTER TABLE accounts ADD COLUMN pcr_managed BOOLEAN DEFAULT false;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+-- Source PCR shop name (for linking back to pcr_shop_list)
+DO $$ BEGIN
+  ALTER TABLE accounts ADD COLUMN pcr_shop_name TEXT;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+
 CREATE INDEX IF NOT EXISTS idx_accounts_category ON accounts(account_category);
 CREATE INDEX IF NOT EXISTS idx_accounts_branch ON accounts(branch);
 CREATE INDEX IF NOT EXISTS idx_accounts_secondary_rep ON accounts(secondary_rep_id);
+CREATE INDEX IF NOT EXISTS idx_accounts_pcr_managed ON accounts(pcr_managed) WHERE pcr_managed = true;

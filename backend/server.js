@@ -1701,6 +1701,58 @@ async function startServer() {
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
 
+  // ─── PCR / SALES DIAGNOSTICS ───
+  app.get('/api/admin/pcr-diagnostics', authenticate, async (req, res) => {
+    if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
+    try {
+      const tables = ['pcr_shop_list', 'pcr_sync_data', 'pcr_daily_sales', 'pcr_shop_targets', 'pcr_sp_mapping', 'sales_data', 'accounts'];
+      const diagnostics = {};
+      for (const t of tables) {
+        try {
+          const count = await queryOne(`SELECT COUNT(*) as count FROM ${t}`);
+          diagnostics[t] = { exists: true, count: parseInt(count.count) };
+          // Get date range for time-series tables
+          if (t === 'pcr_daily_sales') {
+            const range = await queryOne('SELECT MIN(sale_date) as min_date, MAX(sale_date) as max_date FROM pcr_daily_sales');
+            diagnostics[t].min_date = range?.min_date;
+            diagnostics[t].max_date = range?.max_date;
+          }
+          if (t === 'sales_data') {
+            const range = await queryOne('SELECT MIN(sale_date) as min_date, MAX(sale_date) as max_date FROM sales_data');
+            diagnostics[t].min_date = range?.min_date;
+            diagnostics[t].max_date = range?.max_date;
+          }
+          if (t === 'pcr_sync_data') {
+            const range = await queryOne('SELECT MIN(invoice_date) as min_date, MAX(invoice_date) as max_date FROM pcr_sync_data');
+            diagnostics[t].min_date = range?.min_date;
+            diagnostics[t].max_date = range?.max_date;
+          }
+          if (t === 'accounts') {
+            const cats = await queryAll("SELECT account_category, status, COUNT(*) as count FROM accounts WHERE deleted_at IS NULL GROUP BY account_category, status ORDER BY account_category, status");
+            diagnostics[t].breakdown = cats;
+          }
+        } catch (e) {
+          diagnostics[t] = { exists: false, error: e.message };
+        }
+      }
+      // Check cron jobs
+      try {
+        const cronJobs = await queryAll("SELECT jobid, schedule, command, nodename, active FROM cron.job ORDER BY jobid");
+        diagnostics.cron_jobs = cronJobs;
+      } catch (e) {
+        diagnostics.cron_jobs = { error: e.message };
+      }
+      // Check edge functions invocation log
+      try {
+        const edgeLogs = await queryAll("SELECT * FROM cron.job_run_details ORDER BY start_time DESC LIMIT 10");
+        diagnostics.cron_run_history = edgeLogs;
+      } catch (e) {
+        diagnostics.cron_run_history = { error: e.message };
+      }
+      res.json({ diagnostics });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
   // ─── CHECK PCR MATCH: check if a lead has a matching PCR shop ───
   app.get('/api/accounts/:id/pcr-match', authenticate, async (req, res) => {
     try {

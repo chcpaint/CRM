@@ -1712,20 +1712,22 @@ async function startServer() {
           const count = await queryOne(`SELECT COUNT(*) as count FROM ${t}`);
           diagnostics[t] = { exists: true, count: parseInt(count.count) };
           // Get date range for time-series tables
-          if (t === 'pcr_daily_sales') {
-            const range = await queryOne('SELECT MIN(sale_date) as min_date, MAX(sale_date) as max_date FROM pcr_daily_sales');
-            diagnostics[t].min_date = range?.min_date;
-            diagnostics[t].max_date = range?.max_date;
+          // Get columns for each table
+          const cols = await queryAll(
+            "SELECT column_name, data_type FROM information_schema.columns WHERE table_name = $1 ORDER BY ordinal_position", [t]
+          );
+          diagnostics[t].columns = cols.map(c => c.column_name);
+          // Get date ranges for tables with date columns
+          const dateCols = cols.filter(c => c.data_type.includes('date') || c.data_type.includes('timestamp') || c.column_name.includes('date'));
+          for (const dc of dateCols.slice(0, 2)) {
+            try {
+              const range = await queryOne(`SELECT MIN("${dc.column_name}") as min_val, MAX("${dc.column_name}") as max_val FROM ${t}`);
+              diagnostics[t][`${dc.column_name}_range`] = { min: range?.min_val, max: range?.max_val };
+            } catch (e2) { /* skip */ }
           }
           if (t === 'sales_data') {
             const range = await queryOne('SELECT MIN(sale_date) as min_date, MAX(sale_date) as max_date FROM sales_data');
-            diagnostics[t].min_date = range?.min_date;
-            diagnostics[t].max_date = range?.max_date;
-          }
-          if (t === 'pcr_sync_data') {
-            const range = await queryOne('SELECT MIN(invoice_date) as min_date, MAX(invoice_date) as max_date FROM pcr_sync_data');
-            diagnostics[t].min_date = range?.min_date;
-            diagnostics[t].max_date = range?.max_date;
+            diagnostics[t].date_range = { min: range?.min_date, max: range?.max_date };
           }
           if (t === 'accounts') {
             const cats = await queryAll("SELECT account_category, status, COUNT(*) as count FROM accounts WHERE deleted_at IS NULL GROUP BY account_category, status ORDER BY account_category, status");
@@ -1750,6 +1752,37 @@ async function startServer() {
         diagnostics.cron_run_history = { error: e.message };
       }
       res.json({ diagnostics });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
+  // ─── INVOKE EDGE FUNCTIONS MANUALLY ───
+  app.post('/api/admin/invoke-edge-function', authenticate, async (req, res) => {
+    if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
+    try {
+      const { functionName } = req.body;
+      const allowed = ['sync-pcr-daily', 'sync-pcr-full', 'sync-pcr-shops'];
+      if (!allowed.includes(functionName)) return res.status(400).json({ error: `Invalid function. Allowed: ${allowed.join(', ')}` });
+      // Read the sync key from cron jobs
+      const cronJob = await queryOne("SELECT command FROM cron.job WHERE command LIKE $1 LIMIT 1", [`%${functionName}%`]);
+      if (!cronJob) return res.status(404).json({ error: 'No cron job found for this function' });
+      // Extract the sync key from the cron command
+      const keyMatch = cronJob.command.match(/x-sync-key['"]*,\s*['"](.*?)['"]/);
+      const syncKey = keyMatch ? keyMatch[1] : null;
+      if (!syncKey) return res.status(500).json({ error: 'Could not extract sync key from cron job' });
+      // Get the project ref from the URL
+      const urlMatch = cronJob.command.match(/https:\/\/(.*?)\.supabase\.co/);
+      const projectRef = urlMatch ? urlMatch[1] : null;
+      if (!projectRef) return res.status(500).json({ error: 'Could not extract project ref' });
+      const edgeUrl = `https://${projectRef}.supabase.co/functions/v1/${functionName}`;
+      const response = await fetch(edgeUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-sync-key': syncKey },
+        body: JSON.stringify({})
+      });
+      const text = await response.text();
+      let data;
+      try { data = JSON.parse(text); } catch { data = text; }
+      res.json({ success: response.ok, status: response.status, functionName, data });
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
 

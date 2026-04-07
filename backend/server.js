@@ -2270,6 +2270,91 @@ async function startServer() {
   });
 
   // ============================================================================
+  //  HOLDS  (synced daily from CHC Intranet Supabase project)
+  // ============================================================================
+
+  // GET /api/holds → list of active holds
+  //   Reps see only holds where rep_id = themselves.
+  //   Managers/admins see all (or filter ?rep_id=, ?branch=, ?q=)
+  app.get('/api/holds', authenticate, async (req, res) => {
+    try {
+      const where = ['h.is_active = true'];
+      const params = [];
+      let i = 1;
+      if (!isManagerOrAdmin(req.user)) {
+        where.push(`h.rep_id = $${i++}`);
+        params.push(req.user.userId);
+      } else if (req.query.rep_id) {
+        where.push(`h.rep_id = $${i++}`);
+        params.push(parseInt(req.query.rep_id, 10));
+      }
+      if (req.query.branch) {
+        where.push(`LOWER(h.branch) = LOWER($${i++})`);
+        params.push(req.query.branch);
+      }
+      if (req.query.q) {
+        where.push(`(LOWER(h.customer_name) LIKE LOWER($${i}) OR LOWER(h.reason) LIKE LOWER($${i}))`);
+        params.push(`%${req.query.q}%`);
+        i++;
+      }
+      const rows = await queryAll(
+        `SELECT h.id, h.intranet_id, h.customer_name, h.branch, h.reason,
+                h.added_at, h.added_by, h.updates, h.intranet_updated_at,
+                h.account_id, h.rep_id, h.synced_at,
+                CASE WHEN h.added_at IS NULL THEN NULL ELSE (CURRENT_DATE - h.added_at::date)::int END AS days_on_hold,
+                jsonb_array_length(COALESCE(h.updates,'[]'::jsonb)) AS update_count,
+                a.shop_name,
+                u.first_name AS rep_first_name, u.last_name AS rep_last_name
+           FROM public.holds h
+           LEFT JOIN public.accounts a ON a.id = h.account_id
+           LEFT JOIN public.users    u ON u.id = h.rep_id
+          WHERE ${where.join(' AND ')}
+          ORDER BY h.added_at DESC NULLS LAST`,
+        params
+      );
+
+      // Summary counts (manager view gets totals, rep view gets their own)
+      const totRow = await queryOne(
+        `SELECT COUNT(*)::int AS total,
+                COUNT(*) FILTER (WHERE rep_id IS NULL)::int AS unassigned
+           FROM public.holds WHERE is_active = true`
+      );
+      res.json({ holds: rows || [], total_active: totRow?.total || 0, unassigned: totRow?.unassigned || 0 });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
+  // GET /api/holds/by-rep → manager rollup: count per rep
+  app.get('/api/holds/by-rep', authenticate, async (req, res) => {
+    try {
+      if (!isManagerOrAdmin(req.user)) return res.status(403).json({ error: 'Forbidden' });
+      const rows = await queryAll(
+        `SELECT u.id AS rep_id, u.first_name, u.last_name,
+                COUNT(h.id)::int AS holds_count,
+                COALESCE(SUM(jsonb_array_length(COALESCE(h.updates,'[]'::jsonb))),0)::int AS update_count
+           FROM public.users u
+           LEFT JOIN public.holds h ON h.rep_id = u.id AND h.is_active = true
+          WHERE u.is_active = true
+          GROUP BY u.id, u.first_name, u.last_name
+          ORDER BY holds_count DESC, u.first_name`
+      );
+      const unassigned = await queryOne(
+        `SELECT COUNT(*)::int AS c FROM public.holds WHERE is_active=true AND rep_id IS NULL`
+      );
+      res.json({ by_rep: rows || [], unassigned: unassigned?.c || 0 });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
+  // POST /api/holds/refresh → manager-only manual pull from intranet
+  app.post('/api/holds/refresh', authenticate, async (req, res) => {
+    try {
+      if (!isManagerOrAdmin(req.user)) return res.status(403).json({ error: 'Forbidden' });
+      const r = await queryOne(`SELECT public.refresh_holds_from_intranet() AS result`);
+      await logAudit(req, 'holds', null, 'refresh', r?.result || {});
+      res.json({ ok: true, result: r?.result });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
+  // ============================================================================
   //  NOTE COMMENTS  (threaded coaching/replies on a note)
   // ============================================================================
 

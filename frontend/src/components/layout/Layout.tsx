@@ -20,6 +20,7 @@ export default function Layout({ user, onLogout, children }: LayoutProps) {
     { path: '/report', label: 'Report', icon: '\u{1F4CB}' },
     { path: '/accounts', label: 'Accounts', icon: '\u{1F3E2}' },
     { path: '/sales', label: 'Sales', icon: '\u{1F4B0}' },
+    { path: '/holds', label: 'On Hold', icon: '\u{26D4}' },
   ];
 
   if (user.role === 'admin' || user.role === 'manager') {

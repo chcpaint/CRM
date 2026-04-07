@@ -2163,8 +2163,9 @@ async function startServer() {
           acc.followups_due_today += r.report.followups_due_today || 0;
           acc.followups_overdue += r.report.followups_overdue || 0;
           acc.followups_upcoming_7d += r.report.followups_upcoming_7d || 0;
+          acc.holds_count += r.report.holds_count || 0;
           return acc;
-        }, { notes_count: 0, followups_due_today: 0, followups_overdue: 0, followups_upcoming_7d: 0 });
+        }, { notes_count: 0, followups_due_today: 0, followups_overdue: 0, followups_upcoming_7d: 0, holds_count: 0 });
         return res.json({ team: true, date, totals: teamTotals, reports });
       }
 

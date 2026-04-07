@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { Calendar, FileText, Clock, AlertCircle, Users, MessageSquare } from 'lucide-react';
+import { Calendar, FileText, Clock, AlertCircle, Users, MessageSquare, AlertOctagon } from 'lucide-react';
 import { api } from '../services/api';
 import { User } from '../types';
 import NoteCommentThread from '../components/comments/NoteCommentThread';
@@ -21,6 +21,20 @@ interface FollowUpRow {
   days_overdue?: number;
 }
 
+interface HoldRow {
+  id: number;
+  intranet_id: string;
+  customer_name: string;
+  account_id: number | null;
+  branch: string | null;
+  reason: string | null;
+  added_at: string | null;
+  added_by: string | null;
+  days_on_hold: number | null;
+  update_count: number;
+  latest_update: { text: string; addedAt: string; addedBy: string } | null;
+}
+
 interface DailyReportPayload {
   user_id: number;
   report_date: string;
@@ -30,10 +44,12 @@ interface DailyReportPayload {
   followups_overdue: number;
   followups_upcoming_7d: number;
   unread_messages: number;
+  holds_count: number;
   notes: NoteRow[];
   followups_due_list: FollowUpRow[];
   followups_overdue_list: FollowUpRow[];
   followups_upcoming_list: FollowUpRow[];
+  holds_list: HoldRow[];
 }
 
 interface PersonalResp { team: false; date: string; report: DailyReportPayload | null }
@@ -47,7 +63,7 @@ interface TeamRep {
 interface TeamResp {
   team: true;
   date: string;
-  totals: { notes_count: number; followups_due_today: number; followups_overdue: number; followups_upcoming_7d: number };
+  totals: { notes_count: number; followups_due_today: number; followups_overdue: number; followups_upcoming_7d: number; holds_count?: number };
   reports: TeamRep[];
 }
 
@@ -80,7 +96,7 @@ function CountdownChip({ days, overdue }: { days?: number; overdue?: number }) {
   );
 }
 
-type FilterKey = 'all' | 'notes' | 'due' | 'overdue' | 'upcoming';
+type FilterKey = 'all' | 'notes' | 'due' | 'overdue' | 'upcoming' | 'holds';
 
 function StatCard({ icon, label, value, color = 'navy', active, onClick }: { icon: React.ReactNode; label: string; value: number; color?: string; active?: boolean; onClick?: () => void }) {
   const colorMap: Record<string, string> = {
@@ -143,11 +159,12 @@ function ReportBody({ report, currentUser, noteAuthorId }: { report: DailyReport
   const show = (k: FilterKey) => filter === 'all' || filter === k;
   return (
     <div className="space-y-4">
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+      <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
         <StatCard icon={<FileText className="w-4 h-4" />} label="Notes Yesterday" value={report.notes_count} color="navy" active={filter==='notes'} onClick={() => toggle('notes')} />
         <StatCard icon={<Calendar className="w-4 h-4" />} label="Due Today" value={report.followups_due_today} color="amber" active={filter==='due'} onClick={() => toggle('due')} />
         <StatCard icon={<AlertCircle className="w-4 h-4" />} label="Overdue" value={report.followups_overdue} color="red" active={filter==='overdue'} onClick={() => toggle('overdue')} />
         <StatCard icon={<Clock className="w-4 h-4" />} label="Next 7 Days" value={report.followups_upcoming_7d} color="green" active={filter==='upcoming'} onClick={() => toggle('upcoming')} />
+        <StatCard icon={<AlertOctagon className="w-4 h-4" />} label="On Hold" value={report.holds_count || 0} color="red" active={filter==='holds'} onClick={() => toggle('holds')} />
       </div>
       {filter !== 'all' && (
         <div className="text-xs text-navy-500 flex items-center gap-2">
@@ -216,6 +233,44 @@ function ReportBody({ report, currentUser, noteAuthorId }: { report: DailyReport
           </ul>
         </section>
       )}
+
+      {show('holds') && report.holds_list && report.holds_list.length > 0 && (
+        <section>
+          <h3 className="font-semibold text-red-700 mb-2 flex items-center gap-1">
+            <AlertOctagon className="w-4 h-4" /> Customers On Hold ({report.holds_count || 0})
+            <Link to="/holds" className="ml-2 text-xs font-normal text-brand-600 hover:underline">View all</Link>
+          </h3>
+          <ul className="bg-white border border-red-100 rounded-lg divide-y divide-red-50">
+            {report.holds_list.map(h => (
+              <li key={h.id} className="p-3">
+                <div className="flex items-center justify-between gap-2 flex-wrap">
+                  {h.account_id ? (
+                    <Link to={`/accounts/${h.account_id}`} className="text-sm font-semibold text-navy-900 hover:text-brand-600">
+                      {h.customer_name}
+                    </Link>
+                  ) : (
+                    <span className="text-sm font-semibold text-navy-900">{h.customer_name}</span>
+                  )}
+                  <div className="flex items-center gap-2 text-xs">
+                    {h.branch && <span className="text-navy-500">{h.branch}</span>}
+                    {h.days_on_hold !== null && (
+                      <span className={`px-2 py-0.5 rounded-full font-semibold ${h.days_on_hold >= 30 ? 'bg-red-100 text-red-700' : h.days_on_hold >= 7 ? 'bg-amber-100 text-amber-800' : 'bg-navy-100 text-navy-700'}`}>
+                        {h.days_on_hold}d
+                      </span>
+                    )}
+                  </div>
+                </div>
+                {h.reason && <div className="text-sm text-red-700 mt-1">{h.reason}</div>}
+                {h.latest_update && (
+                  <div className="text-xs text-navy-500 mt-1 italic">
+                    Latest: "{h.latest_update.text}" — {h.latest_update.addedBy}
+                  </div>
+                )}
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
     </div>
   );
 }
@@ -236,6 +291,7 @@ export default function DailyReportPage({ user }: { user: User }) {
     if (teamFilter === 'due') return rep.report.followups_due_today > 0;
     if (teamFilter === 'overdue') return rep.report.followups_overdue > 0;
     if (teamFilter === 'upcoming') return rep.report.followups_upcoming_7d > 0;
+    if (teamFilter === 'holds') return (rep.report.holds_count || 0) > 0;
     return true;
   };
 
@@ -289,11 +345,12 @@ export default function DailyReportPage({ user }: { user: User }) {
 
       {!loading && !error && teamView && team && (
         <div className="space-y-4">
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+          <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
             <StatCard icon={<FileText className="w-4 h-4" />} label="Team Notes" value={team.totals.notes_count} color="navy" active={teamFilter==='notes'} onClick={() => teamToggle('notes')} />
             <StatCard icon={<Calendar className="w-4 h-4" />} label="Due Today" value={team.totals.followups_due_today} color="amber" active={teamFilter==='due'} onClick={() => teamToggle('due')} />
             <StatCard icon={<AlertCircle className="w-4 h-4" />} label="Overdue" value={team.totals.followups_overdue} color="red" active={teamFilter==='overdue'} onClick={() => teamToggle('overdue')} />
             <StatCard icon={<Clock className="w-4 h-4" />} label="Next 7 Days" value={team.totals.followups_upcoming_7d} color="green" active={teamFilter==='upcoming'} onClick={() => teamToggle('upcoming')} />
+            <StatCard icon={<AlertOctagon className="w-4 h-4" />} label="On Hold" value={team.totals.holds_count || 0} color="red" active={teamFilter==='holds'} onClick={() => teamToggle('holds')} />
           </div>
           {teamFilter !== 'all' && (
             <div className="text-xs text-navy-500 flex items-center gap-2">

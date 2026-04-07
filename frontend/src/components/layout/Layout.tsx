@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { User } from '../../types';
 import AISearchBar from '../search/AISearchBar';
+import NotificationBell from '../notifications/NotificationBell';
 
 interface LayoutProps {
   user: User;
@@ -62,6 +63,7 @@ export default function Layout({ user, onLogout, children }: LayoutProps) {
 
           {/* User menu */}
           <div className="flex items-center gap-1 sm:gap-2 flex-shrink-0">
+            <NotificationBell />
             <div className="text-right hidden md:block ml-1">
               <div className="text-sm font-medium">{user.first_name} {user.last_name}</div>
               <div className="text-xs text-navy-300 capitalize">{user.role}</div>

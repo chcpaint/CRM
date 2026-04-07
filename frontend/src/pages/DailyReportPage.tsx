@@ -277,7 +277,7 @@ function ReportBody({ report, currentUser, noteAuthorId }: { report: DailyReport
 }
 
 export default function DailyReportPage({ user }: { user: User }) {
-  const [teamView, setTeamView] = useState(false);
+  const [teamView, setTeamView] = useState(user.role === 'admin' || user.role === 'manager');
   const [personal, setPersonal] = useState<DailyReportPayload | null>(null);
   const [team, setTeam] = useState<TeamResp | null>(null);
   const [loading, setLoading] = useState(true);

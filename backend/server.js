@@ -2080,6 +2080,256 @@ async function startServer() {
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
 
+// ============================================================================
+//  CHC CRM — Daily Report + Comments + Notifications
+//  PASTE THIS BLOCK INTO backend/server.js
+//
+//  Insert location: anywhere AFTER the existing routes (e.g. after the
+//  duplicates routes around line 2081), BUT BEFORE the static frontend lines:
+//
+//      // Serve frontend
+//      const frontendPath = path.join(__dirname, '../frontend/dist');
+//      app.use(express.static(frontendPath));
+//      app.get('*', ...)
+//
+//  This block uses ONLY the helpers already imported at the top of server.js:
+//  queryAll, queryOne, execute, authenticate, logAudit, getPool.
+//  No new npm packages required.
+// ============================================================================
+
+  // ─── HELPER: role check (manager or admin) ───
+  const isManagerOrAdmin = (u) => u && (u.role === 'manager' || u.role === 'admin');
+
+  // ─── HELPER: parse @mentions like @firstname.lastname or @firstname ───
+  async function parseMentions(text) {
+    const matches = [...new Set((text.match(/@([a-zA-Z][a-zA-Z0-9._-]{1,40})/g) || []).map(m => m.slice(1).toLowerCase()))];
+    if (!matches.length) return [];
+    const users = await queryAll(
+      `SELECT id, first_name, last_name FROM users WHERE is_active = true`
+    );
+    const ids = new Set();
+    for (const handle of matches) {
+      const [first, last] = handle.split('.');
+      const hit = users.find(u => {
+        const f = (u.first_name || '').toLowerCase();
+        const l = (u.last_name || '').toLowerCase();
+        if (last) return f === first && l === last;
+        return f === first || `${f}.${l}` === handle;
+      });
+      if (hit) ids.add(hit.id);
+    }
+    return [...ids];
+  }
+
+  // ============================================================================
+  //  DAILY REPORT
+  // ============================================================================
+
+  // GET /api/daily-report           → today's personal report (auto-generates if missing)
+  // GET /api/daily-report?date=YYYY-MM-DD → that day's personal report
+  // GET /api/daily-report?team=true → manager/admin only: full team rollup for today
+  app.get('/api/daily-report', authenticate, async (req, res) => {
+    try {
+      const date = req.query.date || new Date().toISOString().slice(0, 10);
+
+      if (req.query.team === 'true') {
+        if (!isManagerOrAdmin(req.user)) {
+          return res.status(403).json({ error: 'Manager or admin only' });
+        }
+        // Generate fresh reports for every active rep, then return them grouped
+        const reps = await queryAll(
+          `SELECT id, first_name, last_name, role FROM users
+           WHERE is_active = true AND role IN ('rep','manager','admin')
+           ORDER BY first_name, last_name`
+        );
+        const reports = [];
+        for (const r of reps) {
+          const payload = await queryOne(
+            `SELECT public.fn_generate_daily_report($1, $2::date) AS payload`,
+            [r.id, date]
+          );
+          reports.push({
+            user_id: r.id,
+            first_name: r.first_name,
+            last_name: r.last_name,
+            role: r.role,
+            report: payload?.payload || null
+          });
+        }
+        const teamTotals = reports.reduce((acc, r) => {
+          if (!r.report) return acc;
+          acc.notes_count += r.report.notes_count || 0;
+          acc.followups_due_today += r.report.followups_due_today || 0;
+          acc.followups_overdue += r.report.followups_overdue || 0;
+          acc.followups_upcoming_7d += r.report.followups_upcoming_7d || 0;
+          return acc;
+        }, { notes_count: 0, followups_due_today: 0, followups_overdue: 0, followups_upcoming_7d: 0 });
+        return res.json({ team: true, date, totals: teamTotals, reports });
+      }
+
+      // Personal report
+      const result = await queryOne(
+        `SELECT public.fn_generate_daily_report($1, $2::date) AS payload`,
+        [req.user.userId, date]
+      );
+      res.json({ team: false, date, report: result?.payload || null });
+    } catch (e) {
+      console.error('daily-report error:', e);
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // ============================================================================
+  //  NOTIFICATIONS  (in-app only — no email/SMS)
+  // ============================================================================
+
+  // GET /api/notifications        → unread + recent for the bell dropdown
+  // GET /api/notifications?all=true → include read items (last 50)
+  app.get('/api/notifications', authenticate, async (req, res) => {
+    try {
+      const includeRead = req.query.all === 'true';
+      const sql = includeRead
+        ? `SELECT n.*, u.first_name AS actor_first_name, u.last_name AS actor_last_name
+           FROM notifications n LEFT JOIN users u ON n.actor_id = u.id
+           WHERE n.recipient_id = $1
+           ORDER BY n.created_at DESC LIMIT 50`
+        : `SELECT n.*, u.first_name AS actor_first_name, u.last_name AS actor_last_name
+           FROM notifications n LEFT JOIN users u ON n.actor_id = u.id
+           WHERE n.recipient_id = $1 AND n.is_read = false
+           ORDER BY n.created_at DESC LIMIT 50`;
+      const notifications = await queryAll(sql, [req.user.userId]);
+      const countRow = await queryOne(
+        `SELECT COUNT(*) AS unread FROM notifications WHERE recipient_id = $1 AND is_read = false`,
+        [req.user.userId]
+      );
+      res.json({ notifications, unread_count: parseInt(countRow?.unread) || 0 });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
+  // POST /api/notifications/:id/read → mark one as read
+  app.post('/api/notifications/:id/read', authenticate, async (req, res) => {
+    try {
+      await execute(
+        `UPDATE notifications SET is_read = true, read_at = NOW()
+         WHERE id = $1 AND recipient_id = $2`,
+        [req.params.id, req.user.userId]
+      );
+      res.json({ ok: true });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
+  // POST /api/notifications/read-all → mark every unread as read
+  app.post('/api/notifications/read-all', authenticate, async (req, res) => {
+    try {
+      await execute(
+        `UPDATE notifications SET is_read = true, read_at = NOW()
+         WHERE recipient_id = $1 AND is_read = false`,
+        [req.user.userId]
+      );
+      res.json({ ok: true });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
+  // ============================================================================
+  //  NOTE COMMENTS  (threaded coaching/replies on a note)
+  // ============================================================================
+
+  // GET /api/notes/:id/comments → all comments for a note (newest-first)
+  app.get('/api/notes/:id/comments', authenticate, async (req, res) => {
+    try {
+      const note = await queryOne(
+        `SELECT n.*, a.assigned_rep_id FROM notes n
+         LEFT JOIN accounts a ON a.id = n.account_id
+         WHERE n.id = $1`,
+        [req.params.id]
+      );
+      if (!note) return res.status(404).json({ error: 'Note not found' });
+
+      // Reps can only read comments on notes for accounts they own or notes they wrote.
+      // Managers and admins can read everything.
+      if (!isManagerOrAdmin(req.user)
+          && note.created_by_id !== req.user.userId
+          && note.assigned_rep_id !== req.user.userId) {
+        return res.status(403).json({ error: 'Not authorized to view this thread' });
+      }
+
+      const comments = await queryAll(
+        `SELECT c.*, u.first_name, u.last_name, u.role
+         FROM note_comments c
+         JOIN users u ON c.author_id = u.id
+         WHERE c.note_id = $1
+         ORDER BY c.created_at ASC`,
+        [req.params.id]
+      );
+      res.json({ comments });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
+  // POST /api/notes/:id/comments → add a comment (rep can only reply on their own notes;
+  //                                managers/admins can comment on any note)
+  app.post('/api/notes/:id/comments', authenticate, async (req, res) => {
+    try {
+      const body = (req.body.body || '').trim();
+      const parentCommentId = req.body.parent_comment_id || null;
+      if (!body) return res.status(400).json({ error: 'Comment body required' });
+      if (body.length > 4000) return res.status(400).json({ error: 'Comment too long (max 4000 chars)' });
+
+      const note = await queryOne(
+        `SELECT n.*, a.assigned_rep_id FROM notes n
+         LEFT JOIN accounts a ON a.id = n.account_id
+         WHERE n.id = $1`,
+        [req.params.id]
+      );
+      if (!note) return res.status(404).json({ error: 'Note not found' });
+
+      // Permission: managers/admins always allowed. Reps allowed only on their own notes
+      // (i.e. they can reply within a thread that involves them).
+      const isOwnNote = note.created_by_id === req.user.userId
+                       || note.assigned_rep_id === req.user.userId;
+      if (!isManagerOrAdmin(req.user) && !isOwnNote) {
+        return res.status(403).json({ error: 'Only managers/admins can comment on other reps\' notes' });
+      }
+
+      const { lastId } = await execute(
+        `INSERT INTO note_comments (note_id, author_id, parent_comment_id, body)
+         VALUES ($1, $2, $3, $4)`,
+        [req.params.id, req.user.userId, parentCommentId, body]
+      );
+
+      // Notify the note's author (and parent comment author) — done by DB trigger.
+      // Plus parse @mentions and insert into the mentions table (which fires another trigger).
+      const mentionedIds = await parseMentions(body);
+      for (const uid of mentionedIds) {
+        if (uid === req.user.userId) continue;
+        try {
+          await execute(
+            `INSERT INTO mentions (comment_id, mentioned_user_id) VALUES ($1, $2)`,
+            [lastId, uid]
+          );
+        } catch (mErr) {
+          console.error('mention insert error:', mErr.message);
+        }
+      }
+
+      await logAudit(req, 'note_comment', lastId, 'create', { note_id: req.params.id });
+
+      const comment = await queryOne(
+        `SELECT c.*, u.first_name, u.last_name, u.role
+         FROM note_comments c JOIN users u ON c.author_id = u.id
+         WHERE c.id = $1`,
+        [lastId]
+      );
+      res.status(201).json({ comment });
+    } catch (e) {
+      console.error('comment create error:', e);
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // ============================================================================
+  //  END daily-report / comments / notifications block
+  // ============================================================================
+
   // Serve frontend
   const frontendPath = path.join(__dirname, '../frontend/dist');
   app.use(express.static(frontendPath));

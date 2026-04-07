@@ -8,7 +8,7 @@ import AccountsPage from './pages/AccountsPage';
 import AccountDetailPage from './pages/AccountDetailPage';
 import SalesPage from './pages/SalesPage';
 import AdminPage from './pages/AdminPage';
-import ReportPage from './pages/ReportPage';
+import DailyReportPage from './pages/DailyReportPage';
 import Layout from './components/layout/Layout';
 
 export default function App() {
@@ -65,7 +65,7 @@ export default function App() {
         <Route path="/accounts" element={<AccountsPage user={user} />} />
         <Route path="/accounts/:id" element={<AccountDetailPage user={user} />} />
         <Route path="/sales" element={<SalesPage user={user} />} />
-        <Route path="/report" element={<ReportPage user={user} />} />
+        <Route path="/report" element={<DailyReportPage user={user} />} />
         {(user.role === 'admin' || user.role === 'manager') && (
           <Route path="/admin" element={<AdminPage user={user} />} />
         )}

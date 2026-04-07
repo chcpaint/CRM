@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import { api } from '../services/api';
 import { User, DashboardMetrics, STATUS_LABELS, STATUS_COLORS } from '../types';
 import DailyDigest from '../components/dashboard/DailyDigest';
+import MessagesForYouCard from '../components/notifications/MessagesForYouCard';
 
 interface Props { user: User }
 
@@ -49,6 +50,11 @@ export default function DashboardPage({ user }: Props) {
 
       {/* Daily Report — shows on open, dismissable */}
       <DailyDigest user={user} />
+
+      {/* In-app messages inbox */}
+      <div className="mb-4 sm:mb-6">
+        <MessagesForYouCard />
+      </div>
 
       {/* KPI Cards */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3 sm:gap-4 mb-6 sm:mb-8">

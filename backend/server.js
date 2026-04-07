@@ -469,6 +469,20 @@ async function startServer() {
   app.post('/api/accounts/:id/notes', authenticate, async (req, res) => {
     try {
       if (!req.body.content?.trim()) return res.status(400).json({ error: 'Content required' });
+      // Permission: managers/admins can post notes on any account.
+      // Reps can only post on accounts where they are the assigned or secondary rep.
+      // This prevents fellow sales team members from leaving notes on each other's clients.
+      if (!isManagerOrAdmin(req.user)) {
+        const acc = await queryOne(
+          'SELECT assigned_rep_id, secondary_rep_id FROM accounts WHERE id = $1 AND deleted_at IS NULL',
+          [req.params.id]
+        );
+        if (!acc) return res.status(404).json({ error: 'Account not found' });
+        const uid = req.user.userId;
+        if (acc.assigned_rep_id !== uid && acc.secondary_rep_id !== uid) {
+          return res.status(403).json({ error: 'You can only add notes on accounts assigned to you' });
+        }
+      }
       const { lastId } = await execute('INSERT INTO notes (account_id, created_by_id, content, is_voice_transcribed) VALUES ($1,$2,$3,$4)',
         [req.params.id, req.user.userId, req.body.content.trim(), req.body.is_voice_transcribed ? true : false]);
       await execute('UPDATE accounts SET last_contacted_at=NOW(), updated_at=NOW() WHERE id=$1', [req.params.id]);
@@ -2138,9 +2152,10 @@ async function startServer() {
           return res.status(403).json({ error: 'Manager or admin only' });
         }
         // Generate fresh reports for every active rep, then return them grouped
+        // Only include actual sales reps in team activity rollup — exclude managers/admins
         const reps = await queryAll(
           `SELECT id, first_name, last_name, role FROM users
-           WHERE is_active = true AND role IN ('rep','manager','admin')
+           WHERE is_active = true AND role = 'rep'
            ORDER BY first_name, last_name`
         );
         const reports = [];

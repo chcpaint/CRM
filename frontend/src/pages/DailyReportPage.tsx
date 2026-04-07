@@ -80,21 +80,33 @@ function CountdownChip({ days, overdue }: { days?: number; overdue?: number }) {
   );
 }
 
-function StatCard({ icon, label, value, color = 'navy' }: { icon: React.ReactNode; label: string; value: number; color?: string }) {
+type FilterKey = 'all' | 'notes' | 'due' | 'overdue' | 'upcoming';
+
+function StatCard({ icon, label, value, color = 'navy', active, onClick }: { icon: React.ReactNode; label: string; value: number; color?: string; active?: boolean; onClick?: () => void }) {
   const colorMap: Record<string, string> = {
     navy: 'bg-navy-50 text-navy-700',
     amber: 'bg-amber-50 text-amber-700',
     red: 'bg-red-50 text-red-700',
     green: 'bg-green-50 text-green-700',
   };
+  const ringMap: Record<string, string> = {
+    navy: 'ring-navy-500',
+    amber: 'ring-amber-500',
+    red: 'ring-red-500',
+    green: 'ring-green-500',
+  };
   return (
-    <div className={`rounded-xl p-4 ${colorMap[color]}`}>
+    <button
+      type="button"
+      onClick={onClick}
+      className={`text-left rounded-xl p-4 transition ${colorMap[color]} ${onClick ? 'hover:brightness-95 cursor-pointer' : ''} ${active ? `ring-2 ${ringMap[color]} shadow` : ''}`}
+    >
       <div className="flex items-center gap-2 mb-1">
         {icon}
         <div className="text-xs font-medium uppercase tracking-wide opacity-80">{label}</div>
       </div>
       <div className="text-3xl font-bold">{value}</div>
-    </div>
+    </button>
   );
 }
 
@@ -126,16 +138,25 @@ function NoteWithThread({ note, currentUser, noteAuthorId }: { note: NoteRow; cu
 }
 
 function ReportBody({ report, currentUser, noteAuthorId }: { report: DailyReportPayload; currentUser: User; noteAuthorId: number }) {
+  const [filter, setFilter] = useState<FilterKey>('all');
+  const toggle = (k: FilterKey) => setFilter(f => (f === k ? 'all' : k));
+  const show = (k: FilterKey) => filter === 'all' || filter === k;
   return (
     <div className="space-y-4">
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-        <StatCard icon={<FileText className="w-4 h-4" />} label="Notes Yesterday" value={report.notes_count} color="navy" />
-        <StatCard icon={<Calendar className="w-4 h-4" />} label="Due Today" value={report.followups_due_today} color="amber" />
-        <StatCard icon={<AlertCircle className="w-4 h-4" />} label="Overdue" value={report.followups_overdue} color="red" />
-        <StatCard icon={<Clock className="w-4 h-4" />} label="Next 7 Days" value={report.followups_upcoming_7d} color="green" />
+        <StatCard icon={<FileText className="w-4 h-4" />} label="Notes Yesterday" value={report.notes_count} color="navy" active={filter==='notes'} onClick={() => toggle('notes')} />
+        <StatCard icon={<Calendar className="w-4 h-4" />} label="Due Today" value={report.followups_due_today} color="amber" active={filter==='due'} onClick={() => toggle('due')} />
+        <StatCard icon={<AlertCircle className="w-4 h-4" />} label="Overdue" value={report.followups_overdue} color="red" active={filter==='overdue'} onClick={() => toggle('overdue')} />
+        <StatCard icon={<Clock className="w-4 h-4" />} label="Next 7 Days" value={report.followups_upcoming_7d} color="green" active={filter==='upcoming'} onClick={() => toggle('upcoming')} />
       </div>
+      {filter !== 'all' && (
+        <div className="text-xs text-navy-500 flex items-center gap-2">
+          <span>Filtered by <strong className="text-navy-700">{filter}</strong></span>
+          <button onClick={() => setFilter('all')} className="text-brand-600 hover:underline">Clear</button>
+        </div>
+      )}
 
-      {report.followups_overdue_list.length > 0 && (
+      {show('overdue') && report.followups_overdue_list.length > 0 && (
         <section>
           <h3 className="font-semibold text-red-700 mb-2 flex items-center gap-1">
             <AlertCircle className="w-4 h-4" /> Overdue Follow-Ups
@@ -153,7 +174,7 @@ function ReportBody({ report, currentUser, noteAuthorId }: { report: DailyReport
         </section>
       )}
 
-      {report.followups_due_list.length > 0 && (
+      {show('due') && report.followups_due_list.length > 0 && (
         <section>
           <h3 className="font-semibold text-amber-800 mb-2">Due Today</h3>
           <ul className="bg-white border border-amber-100 rounded-lg divide-y divide-amber-50">
@@ -169,7 +190,7 @@ function ReportBody({ report, currentUser, noteAuthorId }: { report: DailyReport
         </section>
       )}
 
-      {report.followups_upcoming_list.length > 0 && (
+      {show('upcoming') && report.followups_upcoming_list.length > 0 && (
         <section>
           <h3 className="font-semibold text-navy-700 mb-2">Upcoming (Next 7 Days)</h3>
           <ul className="bg-white border border-navy-100 rounded-lg divide-y divide-navy-50">
@@ -185,7 +206,7 @@ function ReportBody({ report, currentUser, noteAuthorId }: { report: DailyReport
         </section>
       )}
 
-      {report.notes.length > 0 && (
+      {show('notes') && report.notes.length > 0 && (
         <section>
           <h3 className="font-semibold text-navy-700 mb-2">Yesterday's Notes ({report.notes_count})</h3>
           <ul className="bg-white border border-navy-100 rounded-lg divide-y divide-navy-50">
@@ -207,6 +228,16 @@ export default function DailyReportPage({ user }: { user: User }) {
   const [error, setError] = useState<string | null>(null);
 
   const isManager = user.role === 'admin' || user.role === 'manager';
+  const [teamFilter, setTeamFilter] = useState<FilterKey>('all');
+  const teamToggle = (k: FilterKey) => setTeamFilter(f => (f === k ? 'all' : k));
+  const repMatchesFilter = (rep: TeamRep) => {
+    if (teamFilter === 'all' || !rep.report) return true;
+    if (teamFilter === 'notes') return rep.report.notes_count > 0;
+    if (teamFilter === 'due') return rep.report.followups_due_today > 0;
+    if (teamFilter === 'overdue') return rep.report.followups_overdue > 0;
+    if (teamFilter === 'upcoming') return rep.report.followups_upcoming_7d > 0;
+    return true;
+  };
 
   const load = async () => {
     setLoading(true);
@@ -259,12 +290,18 @@ export default function DailyReportPage({ user }: { user: User }) {
       {!loading && !error && teamView && team && (
         <div className="space-y-4">
           <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-            <StatCard icon={<FileText className="w-4 h-4" />} label="Team Notes" value={team.totals.notes_count} color="navy" />
-            <StatCard icon={<Calendar className="w-4 h-4" />} label="Due Today" value={team.totals.followups_due_today} color="amber" />
-            <StatCard icon={<AlertCircle className="w-4 h-4" />} label="Overdue" value={team.totals.followups_overdue} color="red" />
-            <StatCard icon={<Clock className="w-4 h-4" />} label="Next 7 Days" value={team.totals.followups_upcoming_7d} color="green" />
+            <StatCard icon={<FileText className="w-4 h-4" />} label="Team Notes" value={team.totals.notes_count} color="navy" active={teamFilter==='notes'} onClick={() => teamToggle('notes')} />
+            <StatCard icon={<Calendar className="w-4 h-4" />} label="Due Today" value={team.totals.followups_due_today} color="amber" active={teamFilter==='due'} onClick={() => teamToggle('due')} />
+            <StatCard icon={<AlertCircle className="w-4 h-4" />} label="Overdue" value={team.totals.followups_overdue} color="red" active={teamFilter==='overdue'} onClick={() => teamToggle('overdue')} />
+            <StatCard icon={<Clock className="w-4 h-4" />} label="Next 7 Days" value={team.totals.followups_upcoming_7d} color="green" active={teamFilter==='upcoming'} onClick={() => teamToggle('upcoming')} />
           </div>
-          {team.reports.map(rep => (
+          {teamFilter !== 'all' && (
+            <div className="text-xs text-navy-500 flex items-center gap-2">
+              <span>Showing reps with <strong className="text-navy-700">{teamFilter}</strong></span>
+              <button onClick={() => setTeamFilter('all')} className="text-brand-600 hover:underline">Clear</button>
+            </div>
+          )}
+          {team.reports.filter(repMatchesFilter).map(rep => (
             <details key={rep.user_id} className="bg-white border border-navy-100 rounded-xl">
               <summary className="cursor-pointer p-4 flex items-center justify-between hover:bg-navy-50">
                 <div>

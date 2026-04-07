@@ -131,6 +131,7 @@ async function startServer() {
   await initDatabase();
   await autoSeed();
   const app = express();
+  app.set('trust proxy', 1);
 
   app.use(helmet({ contentSecurityPolicy: false, crossOriginEmbedderPolicy: false }));
   app.use(compression());
@@ -2227,6 +2228,44 @@ async function startServer() {
         [req.user.userId]
       );
       res.json({ ok: true });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
+  // GET /api/notifications/preview → unread count + 5 newest unread
+  app.get('/api/notifications/preview', authenticate, async (req, res) => {
+    try {
+      const rows = await queryAll(
+        `SELECT id, type, source_table, source_id, note_id, preview_text, is_read, created_at
+           FROM notifications
+          WHERE recipient_id = $1 AND is_read = false
+          ORDER BY created_at DESC
+          LIMIT 5`,
+        [req.user.userId]
+      );
+      const countRow = await queryOne(
+        `SELECT COUNT(*)::int AS unread_count FROM notifications
+          WHERE recipient_id = $1 AND is_read = false`,
+        [req.user.userId]
+      );
+      res.json({ unread_count: countRow?.unread_count || 0, items: rows || [] });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
+  // GET /api/notifications/team-digest → manager/admin team rollup
+  app.get('/api/notifications/team-digest', authenticate, async (req, res) => {
+    try {
+      if (!isManagerOrAdmin(req.user)) return res.status(403).json({ error: 'Forbidden' });
+      const rows = await queryAll(
+        `SELECT u.id AS user_id, u.first_name, u.last_name,
+                COUNT(n.id) FILTER (WHERE n.is_read = false)::int AS unread_count,
+                MAX(n.created_at) AS latest_at
+           FROM users u
+           LEFT JOIN notifications n ON n.recipient_id = u.id
+          WHERE u.is_active = true
+          GROUP BY u.id, u.first_name, u.last_name
+          ORDER BY unread_count DESC, u.first_name ASC`
+      );
+      res.json({ team: rows || [] });
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
 

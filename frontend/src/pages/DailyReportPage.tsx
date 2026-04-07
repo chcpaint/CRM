@@ -1,8 +1,9 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { Calendar, FileText, Clock, AlertCircle, Users } from 'lucide-react';
+import { Calendar, FileText, Clock, AlertCircle, Users, MessageSquare } from 'lucide-react';
 import { api } from '../services/api';
 import { User } from '../types';
+import NoteCommentThread from '../components/comments/NoteCommentThread';
 
 interface NoteRow {
   id: number;
@@ -97,7 +98,34 @@ function StatCard({ icon, label, value, color = 'navy' }: { icon: React.ReactNod
   );
 }
 
-function ReportBody({ report }: { report: DailyReportPayload }) {
+function NoteWithThread({ note, currentUser, noteAuthorId }: { note: NoteRow; currentUser: User; noteAuthorId: number }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <li className="p-3">
+      <Link to={`/accounts/${note.account_id}`} className="text-sm font-medium text-brand-600 hover:underline">
+        {note.shop_name}
+      </Link>
+      <div className="text-sm text-navy-700 mt-1 line-clamp-2">{note.content}</div>
+      <div className="flex items-center justify-between mt-1">
+        <div className="text-[11px] text-navy-400">{new Date(note.created_at).toLocaleString()}</div>
+        <button
+          onClick={() => setOpen(o => !o)}
+          className="inline-flex items-center gap-1 text-xs font-medium text-brand-600 hover:text-brand-700"
+        >
+          <MessageSquare className="w-3.5 h-3.5" />
+          {open ? 'Hide thread' : 'Reply / Add note'}
+        </button>
+      </div>
+      {open && (
+        <div className="mt-3 pt-3 border-t border-navy-100">
+          <NoteCommentThread noteId={note.id} currentUser={currentUser} noteAuthorId={noteAuthorId} />
+        </div>
+      )}
+    </li>
+  );
+}
+
+function ReportBody({ report, currentUser, noteAuthorId }: { report: DailyReportPayload; currentUser: User; noteAuthorId: number }) {
   return (
     <div className="space-y-4">
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
@@ -162,13 +190,7 @@ function ReportBody({ report }: { report: DailyReportPayload }) {
           <h3 className="font-semibold text-navy-700 mb-2">Yesterday's Notes ({report.notes_count})</h3>
           <ul className="bg-white border border-navy-100 rounded-lg divide-y divide-navy-50">
             {report.notes.map(n => (
-              <li key={n.id} className="p-3">
-                <Link to={`/accounts/${n.account_id}`} className="text-sm font-medium text-brand-600 hover:underline">
-                  {n.shop_name}
-                </Link>
-                <div className="text-sm text-navy-700 mt-1 line-clamp-2">{n.content}</div>
-                <div className="text-[11px] text-navy-400 mt-1">{new Date(n.created_at).toLocaleString()}</div>
-              </li>
+              <NoteWithThread key={n.id} note={n} currentUser={currentUser} noteAuthorId={noteAuthorId} />
             ))}
           </ul>
         </section>
@@ -257,13 +279,13 @@ export default function DailyReportPage({ user }: { user: User }) {
                   </div>
                 )}
               </summary>
-              {rep.report && <div className="p-4 border-t border-navy-100"><ReportBody report={rep.report} /></div>}
+              {rep.report && <div className="p-4 border-t border-navy-100"><ReportBody report={rep.report} currentUser={user} noteAuthorId={rep.user_id} /></div>}
             </details>
           ))}
         </div>
       )}
 
-      {!loading && !error && !teamView && personal && <ReportBody report={personal} />}
+      {!loading && !error && !teamView && personal && <ReportBody report={personal} currentUser={user} noteAuthorId={user.id} />}
       {!loading && !error && !teamView && !personal && (
         <div className="bg-white border border-navy-100 rounded-xl p-8 text-center text-navy-400">
           No data yet — your first report will appear after your next activity.

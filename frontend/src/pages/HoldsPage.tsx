@@ -1,8 +1,10 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { AlertOctagon, RefreshCw, Search, MapPin, User as UserIcon, ChevronDown, ChevronRight } from 'lucide-react';
+import { AlertOctagon, RefreshCw, Search, MapPin, User as UserIcon, ChevronDown, ChevronRight, UserPlus, Check } from 'lucide-react';
 import { api } from '../services/api';
 import { User } from '../types';
+
+interface RepOption { id: number; first_name: string; last_name: string; role: string; is_active: boolean }
 
 interface HoldUpdate { text: string; addedAt: string; addedBy: string }
 interface Hold {
@@ -32,8 +34,51 @@ function DaysChip({ days }: { days: number | null }) {
   return <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold ${cls}`}>{days}d on hold</span>;
 }
 
-function HoldRow({ hold }: { hold: Hold }) {
+function AssignControl({ hold, reps, onAssigned }: { hold: Hold; reps: RepOption[]; onAssigned: (repId: number) => void }) {
+  const [picking, setPicking] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const submit = async (repId: number) => {
+    setSaving(true); setErr(null);
+    try {
+      await api.put(`/holds/${hold.id}/assign`, { rep_id: repId });
+      onAssigned(repId);
+      setPicking(false);
+    } catch (e: any) {
+      setErr(e.error || 'failed');
+    } finally { setSaving(false); }
+  };
+  if (!picking) {
+    return (
+      <button
+        onClick={() => setPicking(true)}
+        className="inline-flex items-center gap-1 px-2 py-1 bg-amber-100 text-amber-800 rounded text-xs font-semibold hover:bg-amber-200"
+      >
+        <UserPlus className="w-3 h-3" /> Assign rep
+      </button>
+    );
+  }
+  return (
+    <div className="inline-flex items-center gap-1">
+      <select
+        autoFocus
+        disabled={saving}
+        onChange={e => e.target.value && submit(parseInt(e.target.value, 10))}
+        className="text-xs border border-navy-200 rounded px-2 py-1 bg-white"
+        defaultValue=""
+      >
+        <option value="" disabled>Pick rep…</option>
+        {reps.map(r => <option key={r.id} value={r.id}>{r.first_name} {r.last_name}</option>)}
+      </select>
+      <button onClick={() => setPicking(false)} className="text-xs text-navy-500 hover:text-navy-800">Cancel</button>
+      {err && <span className="text-xs text-red-600">{err}</span>}
+    </div>
+  );
+}
+
+function HoldRow({ hold, reps, onAssigned }: { hold: Hold; reps: RepOption[]; onAssigned: (holdId: number, repId: number) => void }) {
   const [open, setOpen] = useState(false);
+  const isManager = reps.length > 0;
   return (
     <li className="bg-white">
       <div className="p-3 sm:p-4 flex items-start gap-3">
@@ -54,10 +99,14 @@ function HoldRow({ hold }: { hold: Hold }) {
                 <MapPin className="w-3 h-3" /> {hold.branch}
               </span>
             )}
-            {hold.rep_first_name && (
+            {hold.rep_first_name ? (
               <span className="inline-flex items-center gap-1 text-xs text-navy-500">
                 <UserIcon className="w-3 h-3" /> {hold.rep_first_name} {hold.rep_last_name}
               </span>
+            ) : isManager ? (
+              <AssignControl hold={hold} reps={reps} onAssigned={(repId) => onAssigned(hold.id, repId)} />
+            ) : (
+              <span className="text-xs text-amber-700 font-semibold">Unassigned</span>
             )}
             <DaysChip days={hold.days_on_hold} />
             {hold.update_count > 0 && (
@@ -92,10 +141,12 @@ function HoldRow({ hold }: { hold: Hold }) {
 
 export default function HoldsPage({ user }: { user: User }) {
   const [data, setData] = useState<HoldsResp | null>(null);
+  const [reps, setReps] = useState<RepOption[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [q, setQ] = useState('');
   const [branch, setBranch] = useState<string>('');
+  const [unassignedOnly, setUnassignedOnly] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const isManager = user.role === 'admin' || user.role === 'manager';
 
@@ -115,7 +166,25 @@ export default function HoldsPage({ user }: { user: User }) {
     }
   };
 
-  useEffect(() => { load(); }, []);
+  const loadReps = async () => {
+    if (!isManager) return;
+    try {
+      const r = await api.get<{ users: RepOption[] }>('/auth/users');
+      setReps((r.users || []).filter(u => u.is_active));
+    } catch {}
+  };
+
+  useEffect(() => { load(); loadReps(); }, []);
+
+  const onAssigned = (holdId: number, repId: number) => {
+    const rep = reps.find(r => r.id === repId);
+    if (!data || !rep) return;
+    setData({
+      ...data,
+      holds: data.holds.map(h => h.id === holdId ? { ...h, rep_id: repId, rep_first_name: rep.first_name, rep_last_name: rep.last_name } : h),
+      unassigned: Math.max(0, data.unassigned - 1),
+    });
+  };
 
   const branches = useMemo(() => {
     const set = new Set<string>();
@@ -127,9 +196,10 @@ export default function HoldsPage({ user }: { user: User }) {
     if (!data) return [];
     return data.holds.filter(h =>
       (!branch || h.branch === branch) &&
+      (!unassignedOnly || h.rep_id === null) &&
       (!q || h.customer_name.toLowerCase().includes(q.toLowerCase()) || (h.reason || '').toLowerCase().includes(q.toLowerCase()))
     );
-  }, [data, branch, q]);
+  }, [data, branch, q, unassignedOnly]);
 
   const onRefresh = async () => {
     setRefreshing(true);
@@ -184,6 +254,15 @@ export default function HoldsPage({ user }: { user: User }) {
           <option value="">All branches</option>
           {branches.map(b => <option key={b} value={b}>{b}</option>)}
         </select>
+        {isManager && (
+          <button
+            onClick={() => setUnassignedOnly(u => !u)}
+            className={`px-3 py-2 rounded-lg text-sm font-medium border ${unassignedOnly ? 'bg-amber-500 text-white border-amber-500' : 'bg-white border-navy-200 text-navy-700 hover:bg-navy-50'}`}
+          >
+            {unassignedOnly && <Check className="w-4 h-4 inline mr-1" />}
+            Unassigned only{data ? ` (${data.unassigned})` : ''}
+          </button>
+        )}
       </div>
 
       {loading && <div className="text-navy-400">Loading…</div>}
@@ -197,7 +276,7 @@ export default function HoldsPage({ user }: { user: User }) {
 
       {!loading && !error && filtered.length > 0 && (
         <ul className="bg-white border border-navy-100 rounded-xl divide-y divide-navy-100 overflow-hidden">
-          {filtered.map(h => <HoldRow key={h.id} hold={h} />)}
+          {filtered.map(h => <HoldRow key={h.id} hold={h} reps={isManager ? reps : []} onAssigned={onAssigned} />)}
         </ul>
       )}
     </div>

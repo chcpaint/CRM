@@ -65,6 +65,7 @@ interface TeamResp {
   date: string;
   totals: { notes_count: number; followups_due_today: number; followups_overdue: number; followups_upcoming_7d: number; holds_count?: number };
   reports: TeamRep[];
+  unassigned_holds?: number;
 }
 
 function CountdownChip({ days, overdue }: { days?: number; overdue?: number }) {
@@ -345,6 +346,17 @@ export default function DailyReportPage({ user }: { user: User }) {
 
       {!loading && !error && teamView && team && (
         <div className="space-y-4">
+          {(team.unassigned_holds || 0) > 0 && (
+            <Link to="/holds" className="block bg-amber-50 border border-amber-300 rounded-xl p-3 hover:bg-amber-100 transition">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2 text-amber-900">
+                  <AlertOctagon className="w-5 h-5" />
+                  <span className="font-semibold">{team.unassigned_holds} hold{team.unassigned_holds !== 1 ? 's' : ''} need a rep assigned</span>
+                </div>
+                <span className="text-xs text-amber-800 underline">Assign now →</span>
+              </div>
+            </Link>
+          )}
           <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
             <StatCard icon={<FileText className="w-4 h-4" />} label="Team Notes" value={team.totals.notes_count} color="navy" active={teamFilter==='notes'} onClick={() => teamToggle('notes')} />
             <StatCard icon={<Calendar className="w-4 h-4" />} label="Due Today" value={team.totals.followups_due_today} color="amber" active={teamFilter==='due'} onClick={() => teamToggle('due')} />

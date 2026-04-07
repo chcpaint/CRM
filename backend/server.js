@@ -2166,7 +2166,10 @@ async function startServer() {
           acc.holds_count += r.report.holds_count || 0;
           return acc;
         }, { notes_count: 0, followups_due_today: 0, followups_overdue: 0, followups_upcoming_7d: 0, holds_count: 0 });
-        return res.json({ team: true, date, totals: teamTotals, reports });
+        const unassignedHolds = await queryOne(
+          `SELECT COUNT(*)::int AS c FROM public.holds WHERE is_active = true AND rep_id IS NULL`
+        );
+        return res.json({ team: true, date, totals: teamTotals, reports, unassigned_holds: unassignedHolds?.c || 0 });
       }
 
       // Personal report
@@ -2342,6 +2345,41 @@ async function startServer() {
         `SELECT COUNT(*)::int AS c FROM public.holds WHERE is_active=true AND rep_id IS NULL`
       );
       res.json({ by_rep: rows || [], unassigned: unassigned?.c || 0 });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
+  // PUT /api/holds/:id/assign → manager-only: assign rep_id (and optionally account_id)
+  app.put('/api/holds/:id/assign', authenticate, async (req, res) => {
+    try {
+      if (!isManagerOrAdmin(req.user)) return res.status(403).json({ error: 'Forbidden' });
+      const holdId = parseInt(req.params.id, 10);
+      const repId = req.body.rep_id === null ? null : parseInt(req.body.rep_id, 10);
+      const accountId = req.body.account_id === undefined ? undefined
+                       : (req.body.account_id === null ? null : parseInt(req.body.account_id, 10));
+
+      if (repId !== null && Number.isNaN(repId)) return res.status(400).json({ error: 'invalid rep_id' });
+
+      // Verify rep exists and is a real user
+      if (repId !== null) {
+        const u = await queryOne(`SELECT id FROM users WHERE id = $1 AND is_active = true`, [repId]);
+        if (!u) return res.status(404).json({ error: 'rep not found' });
+      }
+
+      let row;
+      if (accountId !== undefined) {
+        row = await queryOne(
+          `UPDATE public.holds SET rep_id = $1, account_id = $2 WHERE id = $3 RETURNING *`,
+          [repId, accountId, holdId]
+        );
+      } else {
+        row = await queryOne(
+          `UPDATE public.holds SET rep_id = $1 WHERE id = $2 RETURNING *`,
+          [repId, holdId]
+        );
+      }
+      if (!row) return res.status(404).json({ error: 'hold not found' });
+      await logAudit(req, 'holds', holdId, 'assign', { rep_id: repId, account_id: accountId });
+      res.json({ ok: true, hold: row });
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
 

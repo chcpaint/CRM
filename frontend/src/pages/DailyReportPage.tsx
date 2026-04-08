@@ -21,6 +21,7 @@ interface FollowUpRow {
   days_overdue?: number;
 }
 
+interface HoldUpdate { text: string; addedAt: string; addedBy: string }
 interface HoldRow {
   id: number;
   intranet_id: string;
@@ -32,7 +33,8 @@ interface HoldRow {
   added_by: string | null;
   days_on_hold: number | null;
   update_count: number;
-  latest_update: { text: string; addedAt: string; addedBy: string } | null;
+  updates: HoldUpdate[];
+  latest_update: HoldUpdate | null;
 }
 
 interface DailyReportPayload {
@@ -45,6 +47,8 @@ interface DailyReportPayload {
   followups_upcoming_7d: number;
   unread_messages: number;
   holds_count: number;
+  holds_source_last_update?: string | null;
+  holds_source_stale?: boolean;
   notes: NoteRow[];
   followups_due_list: FollowUpRow[];
   followups_overdue_list: FollowUpRow[];
@@ -167,6 +171,16 @@ function ReportBody({ report, currentUser, noteAuthorId }: { report: DailyReport
         <StatCard icon={<Clock className="w-4 h-4" />} label="Next 7 Days" value={report.followups_upcoming_7d} color="green" active={filter==='upcoming'} onClick={() => toggle('upcoming')} />
         <StatCard icon={<AlertOctagon className="w-4 h-4" />} label="On Hold" value={report.holds_count || 0} color="red" active={filter==='holds'} onClick={() => toggle('holds')} />
       </div>
+      {report.holds_source_stale && (
+        <div className="rounded-lg border border-amber-300 bg-amber-50 text-amber-900 px-3 py-2 text-xs flex items-start gap-2">
+          <AlertOctagon className="w-4 h-4 mt-0.5 flex-shrink-0" />
+          <div>
+            <strong>On-hold feed is stale.</strong> Last upstream update{' '}
+            {report.holds_source_last_update ? new Date(report.holds_source_last_update).toLocaleString() : 'unknown'}.
+            New notes added in the CHC Intranet since then have not arrived yet.
+          </div>
+        </div>
+      )}
       {filter !== 'all' && (
         <div className="text-xs text-navy-500 flex items-center gap-2">
           <span>Filtered by <strong className="text-navy-700">{filter}</strong></span>
@@ -262,10 +276,18 @@ function ReportBody({ report, currentUser, noteAuthorId }: { report: DailyReport
                   </div>
                 </div>
                 {h.reason && <div className="text-sm text-red-700 mt-1">{h.reason}</div>}
-                {h.latest_update && (
-                  <div className="text-xs text-navy-500 mt-1 italic">
-                    Latest: "{h.latest_update.text}" — {h.latest_update.addedBy}
-                  </div>
+                {h.updates && h.updates.length > 0 && (
+                  <ul className="mt-2 space-y-1.5 border-l-2 border-red-100 pl-3">
+                    {h.updates.map((u, idx) => (
+                      <li key={idx} className="text-xs text-navy-700">
+                        {idx === 0 && (
+                          <span className="inline-block mr-1 px-1.5 py-0.5 rounded bg-red-100 text-red-700 font-semibold uppercase tracking-wide text-[10px]">Latest</span>
+                        )}
+                        <span className="whitespace-pre-wrap">{u.text}</span>
+                        <span className="text-navy-400"> — {u.addedBy}{u.addedAt ? ` · ${new Date(u.addedAt).toLocaleDateString()}` : ''}</span>
+                      </li>
+                    ))}
+                  </ul>
                 )}
               </li>
             ))}

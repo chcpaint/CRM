@@ -2318,7 +2318,12 @@ async function startServer() {
       }
       const rows = await queryAll(
         `SELECT h.id, h.intranet_id, h.customer_name, h.branch, h.reason,
-                h.added_at, h.added_by, h.updates, h.intranet_updated_at,
+                h.added_at, h.added_by,
+                COALESCE((
+                  SELECT jsonb_agg(u ORDER BY i DESC)
+                  FROM jsonb_array_elements(COALESCE(h.updates,'[]'::jsonb)) WITH ORDINALITY AS t(u,i)
+                ), '[]'::jsonb) AS updates,
+                h.intranet_updated_at,
                 h.account_id, h.rep_id, h.synced_at,
                 CASE WHEN h.added_at IS NULL THEN NULL ELSE (CURRENT_DATE - h.added_at::date)::int END AS days_on_hold,
                 jsonb_array_length(COALESCE(h.updates,'[]'::jsonb)) AS update_count,
@@ -2335,10 +2340,18 @@ async function startServer() {
       // Summary counts (manager view gets totals, rep view gets their own)
       const totRow = await queryOne(
         `SELECT COUNT(*)::int AS total,
-                COUNT(*) FILTER (WHERE rep_id IS NULL)::int AS unassigned
+                COUNT(*) FILTER (WHERE rep_id IS NULL)::int AS unassigned,
+                MAX(intranet_updated_at) AS source_last_update,
+                (MAX(intranet_updated_at) IS NULL OR MAX(intranet_updated_at) < NOW() - INTERVAL '48 hours') AS source_stale
            FROM public.holds WHERE is_active = true`
       );
-      res.json({ holds: rows || [], total_active: totRow?.total || 0, unassigned: totRow?.unassigned || 0 });
+      res.json({
+        holds: rows || [],
+        total_active: totRow?.total || 0,
+        unassigned: totRow?.unassigned || 0,
+        source_last_update: totRow?.source_last_update || null,
+        source_stale: !!totRow?.source_stale,
+      });
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
 

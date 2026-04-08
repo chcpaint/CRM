@@ -26,7 +26,7 @@ interface Hold {
   update_count: number;
 }
 
-interface HoldsResp { holds: Hold[]; total_active: number; unassigned: number }
+interface HoldsResp { holds: Hold[]; total_active: number; unassigned: number; source_last_update: string | null; source_stale: boolean }
 
 function DaysChip({ days }: { days: number | null }) {
   if (days === null) return null;
@@ -235,6 +235,15 @@ export default function HoldsPage({ user }: { user: User }) {
           </button>
         )}
       </div>
+
+      {data?.source_stale && (
+        <div className="rounded-lg border border-amber-300 bg-amber-50 text-amber-900 px-4 py-3 text-sm">
+          <strong>Source feed is stale.</strong> The CHC Intranet holds feed was last updated{' '}
+          {data.source_last_update ? new Date(data.source_last_update).toLocaleString() : 'never'}.
+          New holds or update notes added in the intranet after that time have not arrived yet.
+          The CRM sync is running on schedule — the upstream writer on the intranet side needs attention.
+        </div>
+      )}
 
       <div className="flex gap-2 flex-wrap">
         <div className="relative flex-1 min-w-[200px]">

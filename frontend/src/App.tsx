@@ -46,10 +46,16 @@ export default function App() {
 
   if (loading) {
     return (
-      <div className="h-screen flex items-center justify-center bg-navy-50">
-        <div className="text-center">
-          <div className="w-12 h-12 border-4 border-brand-500 border-t-transparent rounded-full animate-spin mx-auto mb-4"></div>
-          <p className="text-navy-500 font-medium">Loading Refinish AI...</p>
+      <div className="h-screen flex items-center justify-center bg-hero-gradient relative overflow-hidden">
+        <div className="absolute inset-0 pointer-events-none">
+          <div className="absolute -top-40 -right-40 w-80 h-80 rounded-full bg-brand-600/10 blur-3xl animate-float" />
+        </div>
+        <div className="text-center relative z-10 animate-fade-in">
+          <div className="w-14 h-14 bg-brand-gradient rounded-2xl flex items-center justify-center mx-auto mb-4 shadow-glow-red animate-pulse-soft">
+            <span className="text-white font-bold text-xl">C</span>
+          </div>
+          <div className="w-10 h-10 border-3 border-brand-400 border-t-transparent rounded-full animate-spin mx-auto mb-4"></div>
+          <p className="text-navy-300 font-semibold tracking-wide text-sm">Loading CHC CRM...</p>
         </div>
       </div>
     );

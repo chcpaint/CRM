@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { Calendar, FileText, Clock, AlertCircle, Users, MessageSquare, AlertOctagon } from 'lucide-react';
+import { Calendar, FileText, Clock, AlertCircle, Users, MessageSquare, AlertOctagon, ShoppingCart } from 'lucide-react';
 import { api } from '../services/api';
 import { User } from '../types';
 import NoteCommentThread from '../components/comments/NoteCommentThread';
@@ -37,6 +37,19 @@ interface HoldRow {
   latest_update: HoldUpdate | null;
 }
 
+interface ReorderAlertRow {
+  id: number;
+  customer_name: string;
+  account_id: number | null;
+  avg_order_gap_days: number;
+  last_order_date: string;
+  days_since_last_order: number;
+  days_overdue: number;
+  order_count: number;
+  total_revenue: number;
+  alert_status: string;
+}
+
 interface DailyReportPayload {
   user_id: number;
   report_date: string;
@@ -47,6 +60,7 @@ interface DailyReportPayload {
   followups_upcoming_7d: number;
   unread_messages: number;
   holds_count: number;
+  reorder_alerts_count: number;
   holds_source_last_update?: string | null;
   holds_source_stale?: boolean;
   notes: NoteRow[];
@@ -54,6 +68,7 @@ interface DailyReportPayload {
   followups_overdue_list: FollowUpRow[];
   followups_upcoming_list: FollowUpRow[];
   holds_list: HoldRow[];
+  reorder_alerts_list: ReorderAlertRow[];
 }
 
 interface PersonalResp { team: false; date: string; report: DailyReportPayload | null }
@@ -67,7 +82,7 @@ interface TeamRep {
 interface TeamResp {
   team: true;
   date: string;
-  totals: { notes_count: number; followups_due_today: number; followups_overdue: number; followups_upcoming_7d: number; holds_count?: number };
+  totals: { notes_count: number; followups_due_today: number; followups_overdue: number; followups_upcoming_7d: number; holds_count?: number; reorder_alerts_count?: number };
   reports: TeamRep[];
   unassigned_holds?: number;
 }
@@ -101,7 +116,7 @@ function CountdownChip({ days, overdue }: { days?: number; overdue?: number }) {
   );
 }
 
-type FilterKey = 'all' | 'notes' | 'due' | 'overdue' | 'upcoming' | 'holds';
+type FilterKey = 'all' | 'notes' | 'due' | 'overdue' | 'upcoming' | 'holds' | 'reorder';
 
 function StatCard({ icon, label, value, color = 'navy', active, onClick }: { icon: React.ReactNode; label: string; value: number; color?: string; active?: boolean; onClick?: () => void }) {
   const colorMap: Record<string, string> = {
@@ -164,12 +179,13 @@ function ReportBody({ report, currentUser, noteAuthorId }: { report: DailyReport
   const show = (k: FilterKey) => filter === 'all' || filter === k;
   return (
     <div className="space-y-4">
-      <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
         <StatCard icon={<FileText className="w-4 h-4" />} label="Notes Yesterday" value={report.notes_count} color="navy" active={filter==='notes'} onClick={() => toggle('notes')} />
         <StatCard icon={<Calendar className="w-4 h-4" />} label="Due Today" value={report.followups_due_today} color="amber" active={filter==='due'} onClick={() => toggle('due')} />
         <StatCard icon={<AlertCircle className="w-4 h-4" />} label="Overdue" value={report.followups_overdue} color="red" active={filter==='overdue'} onClick={() => toggle('overdue')} />
         <StatCard icon={<Clock className="w-4 h-4" />} label="Next 7 Days" value={report.followups_upcoming_7d} color="green" active={filter==='upcoming'} onClick={() => toggle('upcoming')} />
         <StatCard icon={<AlertOctagon className="w-4 h-4" />} label="On Hold" value={report.holds_count || 0} color="red" active={filter==='holds'} onClick={() => toggle('holds')} />
+        <StatCard icon={<ShoppingCart className="w-4 h-4" />} label="Reorder Alerts" value={report.reorder_alerts_count || 0} color="amber" active={filter==='reorder'} onClick={() => toggle('reorder')} />
       </div>
       {report.holds_source_stale && (
         <div className="rounded-lg border border-amber-300 bg-amber-50 text-amber-900 px-3 py-2 text-xs flex items-start gap-2">
@@ -294,6 +310,45 @@ function ReportBody({ report, currentUser, noteAuthorId }: { report: DailyReport
           </ul>
         </section>
       )}
+
+      {show('reorder') && report.reorder_alerts_list && report.reorder_alerts_list.length > 0 && (
+        <section>
+          <h3 className="font-semibold text-amber-800 mb-2 flex items-center gap-1">
+            <ShoppingCart className="w-4 h-4" /> Reorder Alerts ({report.reorder_alerts_count || 0})
+          </h3>
+          <ul className="bg-white border border-amber-100 rounded-lg divide-y divide-amber-50">
+            {report.reorder_alerts_list.map(ra => (
+              <li key={ra.id} className="p-3">
+                <div className="flex items-center justify-between gap-2 flex-wrap">
+                  {ra.account_id ? (
+                    <Link to={`/accounts/${ra.account_id}`} className="text-sm font-semibold text-navy-900 hover:text-brand-600">
+                      {ra.customer_name}
+                    </Link>
+                  ) : (
+                    <span className="text-sm font-semibold text-navy-900">{ra.customer_name}</span>
+                  )}
+                  <span className={`px-2 py-0.5 rounded-full text-xs font-semibold ${
+                    ra.days_overdue >= 30 ? 'bg-red-100 text-red-700' :
+                    ra.days_overdue >= 14 ? 'bg-amber-100 text-amber-800' :
+                    'bg-yellow-100 text-yellow-800'
+                  }`}>
+                    {ra.days_overdue}d overdue
+                  </span>
+                </div>
+                <div className="mt-1.5 flex flex-wrap gap-x-4 gap-y-1 text-xs text-navy-500">
+                  <span>Normal cadence: <strong className="text-navy-700">every {ra.avg_order_gap_days}d</strong></span>
+                  <span>Last order: <strong className="text-navy-700">{new Date(ra.last_order_date + 'T00:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</strong></span>
+                  <span>Silent for: <strong className="text-navy-700">{ra.days_since_last_order}d</strong></span>
+                  <span>Orders: <strong className="text-navy-700">{ra.order_count}</strong></span>
+                  {ra.total_revenue > 0 && (
+                    <span>Revenue: <strong className="text-green-700">${Number(ra.total_revenue).toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}</strong></span>
+                  )}
+                </div>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
     </div>
   );
 }
@@ -315,6 +370,7 @@ export default function DailyReportPage({ user }: { user: User }) {
     if (teamFilter === 'overdue') return rep.report.followups_overdue > 0;
     if (teamFilter === 'upcoming') return rep.report.followups_upcoming_7d > 0;
     if (teamFilter === 'holds') return (rep.report.holds_count || 0) > 0;
+    if (teamFilter === 'reorder') return (rep.report.reorder_alerts_count || 0) > 0;
     return true;
   };
 
@@ -379,12 +435,13 @@ export default function DailyReportPage({ user }: { user: User }) {
               </div>
             </Link>
           )}
-          <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
             <StatCard icon={<FileText className="w-4 h-4" />} label="Team Notes" value={team.totals.notes_count} color="navy" active={teamFilter==='notes'} onClick={() => teamToggle('notes')} />
             <StatCard icon={<Calendar className="w-4 h-4" />} label="Due Today" value={team.totals.followups_due_today} color="amber" active={teamFilter==='due'} onClick={() => teamToggle('due')} />
             <StatCard icon={<AlertCircle className="w-4 h-4" />} label="Overdue" value={team.totals.followups_overdue} color="red" active={teamFilter==='overdue'} onClick={() => teamToggle('overdue')} />
             <StatCard icon={<Clock className="w-4 h-4" />} label="Next 7 Days" value={team.totals.followups_upcoming_7d} color="green" active={teamFilter==='upcoming'} onClick={() => teamToggle('upcoming')} />
             <StatCard icon={<AlertOctagon className="w-4 h-4" />} label="On Hold" value={team.totals.holds_count || 0} color="red" active={teamFilter==='holds'} onClick={() => teamToggle('holds')} />
+            <StatCard icon={<ShoppingCart className="w-4 h-4" />} label="Reorder Alerts" value={team.totals.reorder_alerts_count || 0} color="amber" active={teamFilter==='reorder'} onClick={() => teamToggle('reorder')} />
           </div>
           {teamFilter !== 'all' && (
             <div className="text-xs text-navy-500 flex items-center gap-2">
@@ -404,6 +461,9 @@ export default function DailyReportPage({ user }: { user: User }) {
                     <span>{rep.report.notes_count} notes</span>
                     <span className="text-amber-700">{rep.report.followups_due_today} due</span>
                     <span className="text-red-700">{rep.report.followups_overdue} overdue</span>
+                    {(rep.report.reorder_alerts_count || 0) > 0 && (
+                      <span className="text-amber-700">{rep.report.reorder_alerts_count} reorder</span>
+                    )}
                   </div>
                 )}
               </summary>

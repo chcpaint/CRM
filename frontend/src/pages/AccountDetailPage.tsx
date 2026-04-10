@@ -87,11 +87,94 @@ export default function AccountDetailPage({ user }: Props) {
   const [followUpNotes, setFollowUpNotes] = useState('');
   const [savingFollowUp, setSavingFollowUp] = useState(false);
 
+  // Document Vault
+  interface AccountDocument {
+    id: number;
+    account_id: number;
+    document_type: string;
+    title: string;
+    description: string | null;
+    file_path: string;
+    original_filename: string;
+    file_size: number;
+    mime_type: string;
+    uploaded_by_id: number;
+    expires_at: string | null;
+    is_active: boolean;
+    created_at: string;
+    first_name: string;
+    last_name: string;
+  }
+  const [documents, setDocuments] = useState<AccountDocument[]>([]);
+  const [showDocUpload, setShowDocUpload] = useState(false);
+  const [docForm, setDocForm] = useState({ document_type: 'contract', title: '', description: '', expires_at: '' });
+  const [docFile, setDocFile] = useState<File | null>(null);
+  const [uploadingDoc, setUploadingDoc] = useState(false);
+
+  const DOC_TYPE_LABELS: Record<string, { label: string; icon: string; color: string }> = {
+    contract:              { label: 'Contract',              icon: '📄', color: 'bg-blue-100 text-blue-800' },
+    pricing_agreement:     { label: 'Pricing Agreement',     icon: '💰', color: 'bg-green-100 text-green-800' },
+    rebate:                { label: 'Rebate',                icon: '🏷️', color: 'bg-purple-100 text-purple-800' },
+    credit_application:    { label: 'Credit Application',    icon: '🏦', color: 'bg-amber-100 text-amber-800' },
+    insurance_certificate: { label: 'Insurance Certificate', icon: '🛡️', color: 'bg-teal-100 text-teal-800' },
+    photo:                 { label: 'Photo',                 icon: '📸', color: 'bg-pink-100 text-pink-800' },
+    correspondence:        { label: 'Correspondence',        icon: '✉️', color: 'bg-indigo-100 text-indigo-800' },
+    other:                 { label: 'Other',                 icon: '📎', color: 'bg-navy-100 text-navy-800' },
+  };
+
+  const loadDocuments = async () => {
+    try {
+      const data = await api.get(`/accounts/${id}/documents`);
+      setDocuments(data.documents || []);
+    } catch (err) { console.error(err); }
+  };
+
+  const uploadDocument = async () => {
+    if (!docFile || !docForm.title.trim()) return;
+    setUploadingDoc(true);
+    try {
+      const formData = new FormData();
+      formData.append('file', docFile);
+      formData.append('document_type', docForm.document_type);
+      formData.append('title', docForm.title.trim());
+      if (docForm.description) formData.append('description', docForm.description.trim());
+      if (docForm.expires_at) formData.append('expires_at', docForm.expires_at);
+
+      const token = localStorage.getItem('token');
+      const baseUrl = (import.meta as any).env?.VITE_API_URL || '';
+      const resp = await fetch(`${baseUrl}/api/accounts/${id}/documents`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${token}` },
+        body: formData
+      });
+      if (!resp.ok) throw new Error('Upload failed');
+      setShowDocUpload(false);
+      setDocForm({ document_type: 'contract', title: '', description: '', expires_at: '' });
+      setDocFile(null);
+      loadDocuments();
+    } catch (err) { console.error(err); }
+    finally { setUploadingDoc(false); }
+  };
+
+  const deleteDocument = async (docId: number) => {
+    if (!confirm('Remove this document?')) return;
+    try {
+      await api.delete(`/documents/${docId}`);
+      loadDocuments();
+    } catch (err) { console.error(err); }
+  };
+
+  const formatFileSize = (bytes: number) => {
+    if (bytes < 1024) return bytes + ' B';
+    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+    return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+  };
+
   const { isListening, startListening, stopListening, isSupported } = useVoiceInput(
     (text) => setNewNote(prev => prev + (prev ? ' ' : '') + text)
   );
 
-  useEffect(() => { loadAccount(); }, [id]);
+  useEffect(() => { loadAccount(); loadDocuments(); }, [id]);
 
   const loadAccount = async () => {
     try {
@@ -860,6 +943,136 @@ export default function AccountDetailPage({ user }: Props) {
             )}
           </div>
 
+          {/* Document Vault */}
+          <div className="card">
+            <div className="flex justify-between items-center mb-3">
+              <h3 className="font-bold text-navy-900">Document Vault</h3>
+              <button onClick={() => setShowDocUpload(!showDocUpload)} className="btn-ghost text-sm">
+                {showDocUpload ? 'Cancel' : '+ Upload'}
+              </button>
+            </div>
+
+            {showDocUpload && (
+              <div className="border border-navy-100 rounded-xl p-4 mb-4 bg-navy-50/50 space-y-3">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <select
+                    value={docForm.document_type}
+                    onChange={e => setDocForm(f => ({ ...f, document_type: e.target.value }))}
+                    className="input-field"
+                  >
+                    {Object.entries(DOC_TYPE_LABELS).map(([key, { label, icon }]) => (
+                      <option key={key} value={key}>{icon} {label}</option>
+                    ))}
+                  </select>
+                  <input
+                    placeholder="Title *"
+                    value={docForm.title}
+                    onChange={e => setDocForm(f => ({ ...f, title: e.target.value }))}
+                    className="input-field"
+                  />
+                </div>
+                <input
+                  placeholder="Description (optional)"
+                  value={docForm.description}
+                  onChange={e => setDocForm(f => ({ ...f, description: e.target.value }))}
+                  className="input-field"
+                />
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="text-xs text-navy-500 mb-1 block">File</label>
+                    <input
+                      type="file"
+                      accept=".pdf,.doc,.docx,.png,.jpg,.jpeg,.xls,.xlsx,.csv,.txt"
+                      onChange={e => setDocFile(e.target.files?.[0] || null)}
+                      className="text-sm text-navy-700"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-xs text-navy-500 mb-1 block">Expiration Date (optional)</label>
+                    <input
+                      type="date"
+                      value={docForm.expires_at}
+                      onChange={e => setDocForm(f => ({ ...f, expires_at: e.target.value }))}
+                      className="input-field"
+                    />
+                  </div>
+                </div>
+                <button
+                  onClick={uploadDocument}
+                  disabled={uploadingDoc || !docFile || !docForm.title.trim()}
+                  className="btn-primary"
+                >
+                  {uploadingDoc ? 'Uploading...' : 'Upload Document'}
+                </button>
+              </div>
+            )}
+
+            {documents.length === 0 ? (
+              <p className="text-navy-400 text-sm py-4 text-center">
+                No documents yet. Upload contracts, pricing agreements, rebates, and more.
+              </p>
+            ) : (
+              <div className="space-y-2">
+                {Object.entries(
+                  documents.reduce<Record<string, AccountDocument[]>>((acc, d) => {
+                    const type = d.document_type || 'other';
+                    if (!acc[type]) acc[type] = [];
+                    acc[type].push(d);
+                    return acc;
+                  }, {})
+                ).map(([type, docs]) => {
+                  const config = DOC_TYPE_LABELS[type] || DOC_TYPE_LABELS.other;
+                  return (
+                    <div key={type}>
+                      <div className="text-xs font-semibold text-navy-500 uppercase tracking-wide mb-1 flex items-center gap-1">
+                        <span>{config.icon}</span> {config.label} ({docs.length})
+                      </div>
+                      <div className="space-y-1.5 mb-3">
+                        {docs.map(doc => {
+                          const isExpired = doc.expires_at && new Date(doc.expires_at) < new Date();
+                          const baseUrl = (import.meta as any).env?.VITE_API_URL || '';
+                          return (
+                            <div key={doc.id} className="flex items-center justify-between gap-2 p-2.5 rounded-lg border border-navy-100 hover:border-navy-200 bg-white transition group">
+                              <div className="min-w-0 flex-1">
+                                <a
+                                  href={`${baseUrl}${doc.file_path}`}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="text-sm font-medium text-brand-600 hover:text-brand-700 hover:underline truncate block"
+                                >
+                                  {doc.title}
+                                </a>
+                                <div className="flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] text-navy-400 mt-0.5">
+                                  <span>{doc.original_filename}</span>
+                                  {doc.file_size && <span>{formatFileSize(doc.file_size)}</span>}
+                                  <span>by {doc.first_name} {doc.last_name}</span>
+                                  <span>{new Date(doc.created_at).toLocaleDateString()}</span>
+                                  {doc.expires_at && (
+                                    <span className={isExpired ? 'text-red-600 font-semibold' : 'text-amber-600'}>
+                                      {isExpired ? '⚠ Expired' : 'Exp'}: {new Date(doc.expires_at + 'T00:00:00').toLocaleDateString()}
+                                    </span>
+                                  )}
+                                </div>
+                                {doc.description && <div className="text-xs text-navy-500 mt-0.5">{doc.description}</div>}
+                              </div>
+                              <button
+                                onClick={() => deleteDocument(doc.id)}
+                                className="text-navy-300 hover:text-red-500 text-xs opacity-0 group-hover:opacity-100 transition flex-shrink-0"
+                                title="Remove"
+                              >
+                                ✕
+                              </button>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+
           {/* Notes & Activity Timeline */}
           <div className="card">
             <h3 className="font-bold text-navy-900 mb-4">Notes & Activity Timeline</h3>
@@ -978,3 +1191,4 @@ function InfoRow({ label, value, href }: { label: string; value: string | null |
     </div>
   );
 }
+

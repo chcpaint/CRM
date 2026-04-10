@@ -2179,8 +2179,9 @@ async function startServer() {
           acc.followups_overdue += r.report.followups_overdue || 0;
           acc.followups_upcoming_7d += r.report.followups_upcoming_7d || 0;
           acc.holds_count += r.report.holds_count || 0;
+          acc.reorder_alerts_count += r.report.reorder_alerts_count || 0;
           return acc;
-        }, { notes_count: 0, followups_due_today: 0, followups_overdue: 0, followups_upcoming_7d: 0, holds_count: 0 });
+        }, { notes_count: 0, followups_due_today: 0, followups_overdue: 0, followups_upcoming_7d: 0, holds_count: 0, reorder_alerts_count: 0 });
         const unassignedHolds = await queryOne(
           `SELECT COUNT(*)::int AS c FROM public.holds WHERE is_active = true AND rep_id IS NULL`
         );
@@ -2197,6 +2198,134 @@ async function startServer() {
       console.error('daily-report error:', e);
       res.status(500).json({ error: e.message });
     }
+  });
+
+  // ============================================================================
+  //  REORDER ALERTS
+  // ============================================================================
+
+  // GET /api/reorder-alerts — all active alerts (managers see all, reps see own)
+  app.get('/api/reorder-alerts', authenticate, async (req, res) => {
+    try {
+      const isRep = req.user.role === 'rep';
+      const sql = isRep
+        ? `SELECT ra.*, a.shop_name FROM reorder_alerts ra
+           LEFT JOIN accounts a ON ra.account_id = a.id
+           WHERE ra.rep_id = $1 AND ra.alert_status NOT IN ('resolved')
+           ORDER BY ra.days_overdue DESC`
+        : `SELECT ra.*, a.shop_name, u.first_name AS rep_first_name, u.last_name AS rep_last_name
+           FROM reorder_alerts ra
+           LEFT JOIN accounts a ON ra.account_id = a.id
+           LEFT JOIN users u ON ra.rep_id = u.id
+           WHERE ra.alert_status NOT IN ('resolved')
+           ORDER BY ra.days_overdue DESC`;
+      const alerts = isRep
+        ? await queryAll(sql, [req.user.userId])
+        : await queryAll(sql);
+      res.json({ alerts, total: alerts.length });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
+  // PUT /api/reorder-alerts/:id/acknowledge — mark as acknowledged
+  app.put('/api/reorder-alerts/:id/acknowledge', authenticate, async (req, res) => {
+    try {
+      await execute(
+        `UPDATE reorder_alerts SET alert_status = 'acknowledged', updated_at = NOW() WHERE id = $1`,
+        [req.params.id]
+      );
+      res.json({ ok: true });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
+  // PUT /api/reorder-alerts/:id/snooze — snooze for N days
+  app.put('/api/reorder-alerts/:id/snooze', authenticate, async (req, res) => {
+    try {
+      const days = parseInt(req.body.days) || 7;
+      await execute(
+        `UPDATE reorder_alerts SET alert_status = 'snoozed', snoozed_until = CURRENT_DATE + $1, updated_at = NOW() WHERE id = $2`,
+        [days, req.params.id]
+      );
+      res.json({ ok: true, snoozed_until: new Date(Date.now() + days * 86400000).toISOString().slice(0, 10) });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
+  // POST /api/admin/refresh-reorder-alerts — manual refresh (admin only)
+  app.post('/api/admin/refresh-reorder-alerts', authenticate, async (req, res) => {
+    try {
+      if (!isManagerOrAdmin(req.user)) return res.status(403).json({ error: 'Admin only' });
+      const result = await queryOne('SELECT public.refresh_reorder_alerts() AS result');
+      res.json(result?.result || {});
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
+  // ============================================================================
+  //  DOCUMENT VAULT  (per-account file storage)
+  // ============================================================================
+
+  const docsDir = path.join(__dirname, 'uploads', 'documents');
+  if (!fs.existsSync(docsDir)) fs.mkdirSync(docsDir, { recursive: true });
+  const documentUpload = multer({
+    storage: multer.diskStorage({
+      destination: (req, file, cb) => cb(null, docsDir),
+      filename: (req, file, cb) => {
+        const ext = path.extname(file.originalname);
+        cb(null, `${req.params.id}-${Date.now()}${ext}`);
+      }
+    }),
+    limits: { fileSize: 15 * 1024 * 1024 }, // 15MB
+    fileFilter: (req, file, cb) => {
+      const allowed = ['.pdf', '.doc', '.docx', '.png', '.jpg', '.jpeg', '.xls', '.xlsx', '.csv', '.txt'];
+      const ext = path.extname(file.originalname).toLowerCase();
+      cb(null, allowed.includes(ext));
+    }
+  });
+
+  // GET /api/accounts/:id/documents — list all documents for an account
+  app.get('/api/accounts/:id/documents', authenticate, async (req, res) => {
+    try {
+      const docs = await queryAll(
+        `SELECT d.*, u.first_name, u.last_name FROM account_documents d
+         LEFT JOIN users u ON d.uploaded_by_id = u.id
+         WHERE d.account_id = $1 AND d.is_active = TRUE
+         ORDER BY d.document_type, d.created_at DESC`,
+        [req.params.id]
+      );
+      res.json({ documents: docs });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
+  // POST /api/accounts/:id/documents — upload a document
+  app.post('/api/accounts/:id/documents', authenticate, documentUpload.single('file'), async (req, res) => {
+    try {
+      if (!req.file) return res.status(400).json({ error: 'No file uploaded or invalid file type' });
+      const { document_type, title, description, expires_at } = req.body;
+      if (!document_type || !title) return res.status(400).json({ error: 'document_type and title required' });
+      const filePath = `/uploads/documents/${req.file.filename}`;
+      const { lastId } = await execute(
+        `INSERT INTO account_documents (account_id, document_type, title, description, file_path, original_filename, file_size, mime_type, uploaded_by_id, expires_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+        [req.params.id, document_type, title, description || null, filePath, req.file.originalname, req.file.size, req.file.mimetype, req.user.userId, expires_at || null]
+      );
+      await logAudit(req, 'account_document', lastId, 'create', { title, document_type, account_id: req.params.id });
+      const doc = await queryOne('SELECT d.*, u.first_name, u.last_name FROM account_documents d LEFT JOIN users u ON d.uploaded_by_id = u.id WHERE d.id = $1', [lastId]);
+      res.status(201).json({ document: doc });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
+  // DELETE /api/documents/:docId — soft-delete a document
+  app.delete('/api/documents/:docId', authenticate, async (req, res) => {
+    try {
+      await execute('UPDATE account_documents SET is_active = FALSE, updated_at = NOW() WHERE id = $1', [req.params.docId]);
+      await logAudit(req, 'account_document', parseInt(req.params.docId), 'delete', {});
+      res.json({ ok: true });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
+  // Serve uploaded document files
+  app.get('/uploads/documents/:filename', authenticate, (req, res) => {
+    const filePath = path.join(docsDir, req.params.filename);
+    if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'File not found' });
+    res.sendFile(filePath);
   });
 
   // ============================================================================

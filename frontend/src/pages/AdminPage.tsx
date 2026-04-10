@@ -976,8 +976,9 @@ export default function AdminPage({ user }: Props) {
             )}
           </div>
 
-          {/* Google Drive Auto-Import */}
-          <div className="card">
+          {/* Google Drive Auto-Import — hidden for CHC (sales sync via intranet PCR).
+              Preserved in code for standalone / white-label use. */}
+          {false && <div className="card">
             <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between mb-4 gap-2">
               <div>
                 <h2 className="font-bold text-navy-900">Google Drive Auto-Import</h2>
@@ -1051,10 +1052,10 @@ export default function AdminPage({ user }: Props) {
                 )}
               </div>
             )}
-          </div>
+          </div>}
 
-          {/* Import History */}
-          {importHistory.length > 0 && (
+          {/* Import History — hidden alongside Google Drive import */}
+          {false && importHistory.length > 0 && (
             <div className="card">
               <h2 className="font-bold text-navy-900 mb-3">Import History</h2>
               <div className="space-y-2">

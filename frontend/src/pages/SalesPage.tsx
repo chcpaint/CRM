@@ -425,9 +425,12 @@ export default function SalesPage({ user }: Props) {
           <h1 className="text-xl sm:text-2xl font-bold text-navy-900">Sales Tracking</h1>
           <p className="text-navy-500 text-xs sm:text-sm mt-1">Click any customer to see invoices.</p>
         </div>
+        {/* AccountEdge CSV import hidden — sales now sync automatically from CHC intranet via PCR.
+            Uncomment to re-enable for standalone / white-label use.
         <button onClick={() => { setShowImport(!showImport); setParsePreview(null); setImportResult(null); }} className="btn-primary text-sm">
           Import from AccountEdge
         </button>
+        */}
       </div>
 
       {/* Filter Bar */}
@@ -476,8 +479,9 @@ export default function SalesPage({ user }: Props) {
         </div>
       )}
 
-      {/* Import section */}
-      {showImport && (
+      {/* Import section — hidden for CHC (sales sync via intranet PCR).
+          Preserved in code for standalone / white-label use. */}
+      {false && showImport && (
         <div className="card mb-6">
           <h3 className="font-bold text-navy-900 mb-3">Import AccountEdge Sales Report</h3>
           <p className="text-sm text-navy-500 mb-4">
@@ -636,7 +640,7 @@ export default function SalesPage({ user }: Props) {
         <div className="card text-center py-12">
           <p className="text-navy-500">{activeFilters > 0 ? 'No sales match the selected filters.' : 'No sales data yet.'}</p>
           <p className="text-sm text-navy-400 mt-2">
-            {activeFilters > 0 ? 'Try adjusting or clearing your filters.' : 'Import a CSV from AccountEdge to get started.'}
+            {activeFilters > 0 ? 'Try adjusting or clearing your filters.' : 'Sales data syncs automatically from the CHC intranet.'}
           </p>
         </div>
       ) : (

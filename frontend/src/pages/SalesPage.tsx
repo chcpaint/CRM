@@ -399,6 +399,19 @@ export default function SalesPage({ user }: Props) {
 
   const activeFilters = (filterCustomer ? 1 : 0) + (filterSalesperson ? 1 : 0);
 
+  // Compute all unique PCR categories across entire sales dataset (for "not purchased" feature)
+  const allCategories = [...new Set(sales.map(s => s.category).filter(Boolean))].sort();
+
+  // Helper: get categories a customer IS buying
+  const getCustomerCategories = (items: SalesData[]) =>
+    new Set(items.map(s => s.category).filter(Boolean));
+
+  // Helper: get categories a customer is NOT buying
+  const getMissingCategories = (items: SalesData[]) => {
+    const bought = getCustomerCategories(items);
+    return allCategories.filter(c => !bought.has(c));
+  };
+
   return (
     <div>
       {/* Date range banner */}
@@ -680,6 +693,18 @@ export default function SalesPage({ user }: Props) {
                     </div>
                   </button>
 
+                  {/* PCR Categories not being purchased - mobile */}
+                  {(() => {
+                    const missing = getMissingCategories(ct.items);
+                    return missing.length > 0 && allCategories.length > 0 ? (
+                      <div className="px-4 py-2 bg-red-50/60 border-t border-red-100">
+                        <div className="text-xs font-bold text-red-600 uppercase tracking-wide mb-1">PCR Categories Not Being Purchased</div>
+                        <div className="text-xs font-bold text-red-500 leading-relaxed">
+                          {missing.join('  ·  ')}
+                        </div>
+                      </div>
+                    ) : null;
+                  })()}
                   {/* Expanded invoice detail */}
                   {isExpanded && (
                     <div className="border-t border-navy-100 bg-navy-50">
@@ -791,6 +816,20 @@ export default function SalesPage({ user }: Props) {
                           {ct.salesperson || '-'}
                         </td>
                       </tr>
+                      {/* PCR Categories not being purchased */}
+                      {(() => {
+                        const missing = getMissingCategories(ct.items);
+                        return missing.length > 0 && allCategories.length > 0 ? (
+                          <tr key={`${ct.name}-missing-cats`}>
+                            <td colSpan={6} className="px-4 pl-10 py-2 bg-red-50/60 border-b border-red-100">
+                              <span className="text-xs font-bold text-red-600 uppercase tracking-wide mr-2">PCR Categories Not Being Purchased:</span>
+                              <span className="text-xs font-bold text-red-500">
+                                {missing.join('  ·  ')}
+                              </span>
+                            </td>
+                          </tr>
+                        ) : null;
+                      })()}
                       {isExpanded && (
                         <tr key={`${ct.name}-detail`}>
                           <td colSpan={6} className="p-0">

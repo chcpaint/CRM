@@ -1,0 +1,296 @@
+-- CRM Database Schema (PostgreSQL / Supabase)
+-- CHC Paint & Auto Body Supplies
+
+CREATE TABLE IF NOT EXISTS users (
+  id SERIAL PRIMARY KEY,
+  email TEXT UNIQUE NOT NULL,
+  password_hash TEXT NOT NULL,
+  first_name TEXT NOT NULL,
+  last_name TEXT NOT NULL,
+  role TEXT NOT NULL DEFAULT 'rep' CHECK(role IN ('rep', 'manager', 'admin')),
+  is_active BOOLEAN NOT NULL DEFAULT true,
+  last_login TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS accounts (
+  id SERIAL PRIMARY KEY,
+  shop_name TEXT NOT NULL,
+  address TEXT,
+  city TEXT,
+  area TEXT,
+  province TEXT DEFAULT 'ON',
+  contact_names TEXT,
+  phone TEXT,
+  email TEXT,
+  account_type TEXT DEFAULT 'collision',
+  assigned_rep_id INTEGER REFERENCES users(id),
+  status TEXT NOT NULL DEFAULT 'prospect' CHECK(status IN ('prospect', 'active', 'cold', 'dnc', 'churned')),
+  suppliers TEXT,
+  paint_line TEXT,
+  allied_products TEXT,
+  sundries TEXT,
+  has_contract BOOLEAN DEFAULT false,
+  mpo TEXT,
+  num_techs INTEGER,
+  sq_footage TEXT,
+  annual_revenue REAL,
+  former_sherwin_client BOOLEAN DEFAULT false,
+  follow_up_date TEXT,
+  last_contacted_at TIMESTAMPTZ,
+  tags JSONB DEFAULT '[]',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  deleted_at TIMESTAMPTZ
+);
+
+CREATE TABLE IF NOT EXISTS notes (
+  id SERIAL PRIMARY KEY,
+  account_id INTEGER NOT NULL REFERENCES accounts(id),
+  created_by_id INTEGER NOT NULL REFERENCES users(id),
+  content TEXT NOT NULL,
+  is_voice_transcribed BOOLEAN DEFAULT false,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS activities (
+  id SERIAL PRIMARY KEY,
+  account_id INTEGER NOT NULL REFERENCES accounts(id),
+  rep_id INTEGER NOT NULL REFERENCES users(id),
+  activity_type TEXT NOT NULL,
+  description TEXT,
+  scheduled_date TIMESTAMPTZ,
+  completed_date TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Widen activity_type constraint to support new tags
+ALTER TABLE activities DROP CONSTRAINT IF EXISTS activities_activity_type_check;
+DO $$ BEGIN
+  ALTER TABLE activities ADD CONSTRAINT activities_activity_type_check
+    CHECK(activity_type IN ('call','email','text','meeting','visit','sales_call','drop_in','contract_presentation','proposal','product_demo','vendor_partner_visit','other'));
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+
+CREATE TABLE IF NOT EXISTS sales_data (
+  id SERIAL PRIMARY KEY,
+  account_id INTEGER REFERENCES accounts(id),
+  rep_id INTEGER REFERENCES users(id),
+  sale_amount REAL NOT NULL,
+  sale_date TEXT NOT NULL,
+  month TEXT NOT NULL,
+  memo TEXT,
+  customer_name TEXT,
+  imported_from_accountedge BOOLEAN DEFAULT false,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS audit_log (
+  id SERIAL PRIMARY KEY,
+  user_id INTEGER REFERENCES users(id),
+  entity_type TEXT NOT NULL,
+  entity_id INTEGER,
+  action TEXT NOT NULL CHECK(action IN ('create', 'update', 'delete', 'import', 'login', 'logout')),
+  changes JSONB DEFAULT '{}',
+  ip_address TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS duplicate_flags (
+  id SERIAL PRIMARY KEY,
+  account_1_id INTEGER NOT NULL REFERENCES accounts(id),
+  account_2_id INTEGER NOT NULL REFERENCES accounts(id),
+  similarity_score REAL NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'merged', 'dismissed')),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  resolved_at TIMESTAMPTZ
+);
+
+-- Indexes for performance
+CREATE INDEX IF NOT EXISTS idx_accounts_shop_name ON accounts(shop_name);
+CREATE INDEX IF NOT EXISTS idx_accounts_city ON accounts(city);
+CREATE INDEX IF NOT EXISTS idx_accounts_status ON accounts(status);
+CREATE INDEX IF NOT EXISTS idx_accounts_assigned_rep ON accounts(assigned_rep_id);
+CREATE INDEX IF NOT EXISTS idx_accounts_last_contacted ON accounts(last_contacted_at);
+CREATE INDEX IF NOT EXISTS idx_notes_account ON notes(account_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_activities_account ON activities(account_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_sales_account ON sales_data(account_id);
+CREATE INDEX IF NOT EXISTS idx_sales_month ON sales_data(month);
+CREATE INDEX IF NOT EXISTS idx_sales_rep ON sales_data(rep_id);
+CREATE INDEX IF NOT EXISTS idx_audit_entity ON audit_log(entity_type, entity_id);
+CREATE INDEX IF NOT EXISTS idx_audit_user ON audit_log(user_id, created_at DESC);
+
+-- Notification preferences (add to users table)
+-- Line-item detail columns for sales_data (for drill-down)
+DO $$ BEGIN
+  ALTER TABLE sales_data ADD COLUMN item_name TEXT;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+DO $$ BEGIN
+  ALTER TABLE sales_data ADD COLUMN quantity INTEGER DEFAULT 0;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+DO $$ BEGIN
+  ALTER TABLE sales_data ADD COLUMN cogs REAL DEFAULT 0;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+DO $$ BEGIN
+  ALTER TABLE sales_data ADD COLUMN profit REAL DEFAULT 0;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+DO $$ BEGIN
+  ALTER TABLE sales_data ADD COLUMN category TEXT;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+DO $$ BEGIN
+  ALTER TABLE sales_data ADD COLUMN product_line TEXT;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+DO $$ BEGIN
+  ALTER TABLE sales_data ADD COLUMN salesperson TEXT;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+
+-- Notification preferences (add to users table)
+DO $$ BEGIN
+  ALTER TABLE users ADD COLUMN phone TEXT;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+DO $$ BEGIN
+  ALTER TABLE users ADD COLUMN notification_email TEXT;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+DO $$ BEGIN
+  ALTER TABLE users ADD COLUMN sms_enabled BOOLEAN DEFAULT false;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+DO $$ BEGIN
+  ALTER TABLE users ADD COLUMN email_enabled BOOLEAN DEFAULT true;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+DO $$ BEGIN
+  ALTER TABLE users ADD COLUMN daily_digest_time TEXT DEFAULT '07:30';
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+
+-- Google Drive auto-import log
+CREATE TABLE IF NOT EXISTS gdrive_import_log (
+  id SERIAL PRIMARY KEY,
+  status TEXT NOT NULL DEFAULT 'success' CHECK(status IN ('success', 'error', 'running')),
+  files_processed INTEGER DEFAULT 0,
+  records_imported INTEGER DEFAULT 0,
+  unmatched_count INTEGER DEFAULT 0,
+  details JSONB DEFAULT '[]',
+  error_message TEXT,
+  triggered_by TEXT DEFAULT 'cron',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_gdrive_import_log_created ON gdrive_import_log(created_at DESC);
+
+-- Account category: 'lead' for prospects, 'customer' for active buying customers
+DO $$ BEGIN
+  ALTER TABLE accounts ADD COLUMN account_category TEXT DEFAULT 'lead' CHECK(account_category IN ('lead', 'customer'));
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+DO $$ BEGIN
+  ALTER TABLE accounts ADD COLUMN branch TEXT;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+DO $$ BEGIN
+  ALTER TABLE accounts ADD COLUMN postal_code TEXT;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+DO $$ BEGIN
+  ALTER TABLE accounts ADD COLUMN phone2 TEXT;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+DO $$ BEGIN
+  ALTER TABLE accounts ADD COLUMN phone_numbers TEXT DEFAULT '[]';
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+DO $$ BEGIN
+  ALTER TABLE accounts ADD COLUMN email_addresses TEXT DEFAULT '[]';
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+DO $$ BEGIN
+  ALTER TABLE accounts ADD COLUMN accountedge_card_id TEXT;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+
+-- Shop detail fields
+DO $$ BEGIN
+  ALTER TABLE accounts ADD COLUMN num_painters INTEGER;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+DO $$ BEGIN
+  ALTER TABLE accounts ADD COLUMN num_body_men INTEGER;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+DO $$ BEGIN
+  ALTER TABLE accounts ADD COLUMN num_paint_booths INTEGER;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+DO $$ BEGIN
+  ALTER TABLE accounts ADD COLUMN cup_brand TEXT;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+DO $$ BEGIN
+  ALTER TABLE accounts ADD COLUMN paper_brand TEXT;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+DO $$ BEGIN
+  ALTER TABLE accounts ADD COLUMN filler_brand TEXT;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+DO $$ BEGIN
+  ALTER TABLE accounts ADD COLUMN contract_status TEXT DEFAULT 'none';
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+DO $$ BEGIN
+  ALTER TABLE accounts ADD COLUMN deal_details TEXT;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+DO $$ BEGIN
+  ALTER TABLE accounts ADD COLUMN banner TEXT;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+DO $$ BEGIN
+  ALTER TABLE accounts ADD COLUMN business_types JSONB DEFAULT '[]';
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+DO $$ BEGIN
+  ALTER TABLE accounts ADD COLUMN business_type_notes TEXT;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+DO $$ BEGIN
+  ALTER TABLE accounts ADD COLUMN contract_file_path TEXT;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+DO $$ BEGIN
+  ALTER TABLE accounts ADD COLUMN contract_expiration_date DATE;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+
+DO $$ BEGIN
+  ALTER TABLE accounts ADD COLUMN secondary_rep_id INTEGER REFERENCES users(id);
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+
+-- PCR-managed flag: true when account was created/promoted by PCR sync (not manually)
+DO $$ BEGIN
+  ALTER TABLE accounts ADD COLUMN pcr_managed BOOLEAN DEFAULT false;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+-- Source PCR shop name (for linking back to pcr_shop_list)
+DO $$ BEGIN
+  ALTER TABLE accounts ADD COLUMN pcr_shop_name TEXT;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+
+CREATE INDEX IF NOT EXISTS idx_accounts_category ON accounts(account_category);
+CREATE INDEX IF NOT EXISTS idx_accounts_branch ON accounts(branch);
+CREATE INDEX IF NOT EXISTS idx_accounts_secondary_rep ON accounts(secondary_rep_id);
+CREATE INDEX IF NOT EXISTS idx_accounts_pcr_managed ON accounts(pcr_managed) WHERE pcr_managed = true;

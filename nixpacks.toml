@@ -1,0 +1,14 @@
+[phases.setup]
+nixPkgs = ["nodejs-18_x"]
+
+[phases.install]
+cmds = [
+  "cd backend && npm ci --only=production",
+  "cd frontend && npm ci"
+]
+
+[phases.build]
+cmds = ["cd frontend && npx vite build"]
+
+[start]
+cmd = "node backend/server.js"

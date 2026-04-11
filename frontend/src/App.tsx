@@ -10,6 +10,7 @@ import SalesPage from './pages/SalesPage';
 import AdminPage from './pages/AdminPage';
 import DailyReportPage from './pages/DailyReportPage';
 import HoldsPage from './pages/HoldsPage';
+import CustomerAlertsPage from './pages/CustomerAlertsPage';
 import Layout from './components/layout/Layout';
 
 export default function App() {
@@ -74,6 +75,7 @@ export default function App() {
         <Route path="/sales" element={<SalesPage user={user} />} />
         <Route path="/report" element={<DailyReportPage user={user} />} />
         <Route path="/holds" element={<HoldsPage user={user} />} />
+        <Route path="/customer-alerts" element={<CustomerAlertsPage user={user} />} />
         {(user.role === 'admin' || user.role === 'manager') && (
           <Route path="/admin" element={<AdminPage user={user} />} />
         )}

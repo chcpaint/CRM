@@ -2201,6 +2201,80 @@ async function startServer() {
   });
 
   // ============================================================================
+  //  CUSTOMER ALERTS  (lapsed 60+ day customers with purchase history)
+  // ============================================================================
+
+  app.get('/api/customer-alerts', authenticate, async (req, res) => {
+    try {
+      // Compute lapsed customers: 60+ days since last order, 4+ orders historically
+      // Includes their top categories, product lines, total revenue, and linked account/rep
+      const alerts = await queryAll(`
+        WITH customer_dates AS (
+          SELECT customer_name, sale_date::date AS d
+          FROM sales_data
+          WHERE sale_date IS NOT NULL AND sale_date <> ''
+          GROUP BY customer_name, sale_date::date
+        ),
+        gaps AS (
+          SELECT customer_name, d,
+            d - LAG(d) OVER (PARTITION BY customer_name ORDER BY d) AS gap_days
+          FROM customer_dates
+        ),
+        cadence AS (
+          SELECT customer_name,
+            COUNT(*) + 1 AS order_count,
+            ROUND(AVG(gap_days))::int AS avg_gap_days,
+            MAX(d) AS last_order_date,
+            (CURRENT_DATE - MAX(d))::int AS days_since_last
+          FROM gaps
+          WHERE gap_days IS NOT NULL
+          GROUP BY customer_name
+          HAVING COUNT(*) >= 3
+        ),
+        lapsed AS (
+          SELECT * FROM cadence WHERE days_since_last > 60
+        ),
+        cat_agg AS (
+          SELECT s.customer_name,
+            array_agg(DISTINCT s.category ORDER BY s.category) FILTER (WHERE s.category IS NOT NULL AND s.category <> '') AS categories,
+            array_agg(DISTINCT s.product_line ORDER BY s.product_line) FILTER (WHERE s.product_line IS NOT NULL AND s.product_line <> '') AS product_lines,
+            SUM(s.sale_amount) AS total_revenue,
+            MAX(s.salesperson) AS salesperson
+          FROM sales_data s
+          WHERE s.customer_name IN (SELECT customer_name FROM lapsed)
+          GROUP BY s.customer_name
+        )
+        SELECT
+          l.customer_name,
+          l.order_count,
+          l.avg_gap_days,
+          l.last_order_date,
+          l.days_since_last,
+          c.categories,
+          c.product_lines,
+          ROUND(c.total_revenue::numeric, 2) AS total_revenue,
+          c.salesperson,
+          a.id AS account_id,
+          a.shop_name,
+          a.status AS account_status,
+          a.assigned_rep_id AS rep_id,
+          u.first_name AS rep_first_name,
+          u.last_name AS rep_last_name
+        FROM lapsed l
+        JOIN cat_agg c ON c.customer_name = l.customer_name
+        LEFT JOIN accounts a ON a.deleted_at IS NULL
+          AND (LOWER(a.shop_name) = LOWER(l.customer_name) OR LOWER(a.pcr_shop_name) = LOWER(l.customer_name))
+        LEFT JOIN users u ON a.assigned_rep_id = u.id
+        ORDER BY c.total_revenue DESC NULLS LAST
+      `);
+      res.json({ alerts, total: alerts.length });
+    } catch (e) {
+      console.error('customer-alerts error:', e);
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // ============================================================================
   //  REORDER ALERTS
   // ============================================================================
 

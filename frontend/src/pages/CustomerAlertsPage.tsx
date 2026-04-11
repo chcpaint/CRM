@@ -51,10 +51,14 @@ export default function CustomerAlertsPage({ user }: { user: User }) {
     }
   };
 
-  const fmtMoney = (n: number) => '$' + Number(n).toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 });
+  const fmtMoney = (n: number | string) => '$' + Number(n || 0).toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 });
   const fmtDate = (d: string) => {
-    try { return new Date(d + 'T00:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }); }
-    catch { return d; }
+    try {
+      const raw = d.includes('T') ? d : d + 'T00:00:00';
+      const parsed = new Date(raw);
+      if (isNaN(parsed.getTime())) return d;
+      return parsed.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+    } catch { return d; }
   };
 
   // Unique reps for filter
@@ -79,9 +83,9 @@ export default function CustomerAlertsPage({ user }: { user: User }) {
   // Sort
   const sorted = [...filtered].sort((a, b) => {
     let cmp = 0;
-    if (sortBy === 'days') cmp = a.days_since_last - b.days_since_last;
-    else if (sortBy === 'revenue') cmp = (a.total_revenue || 0) - (b.total_revenue || 0);
-    else if (sortBy === 'orders') cmp = a.order_count - b.order_count;
+    if (sortBy === 'days') cmp = Number(a.days_since_last) - Number(b.days_since_last);
+    else if (sortBy === 'revenue') cmp = (Number(a.total_revenue) || 0) - (Number(b.total_revenue) || 0);
+    else if (sortBy === 'orders') cmp = Number(a.order_count) - Number(b.order_count);
     else if (sortBy === 'name') cmp = a.customer_name.localeCompare(b.customer_name);
     return sortAsc ? cmp : -cmp;
   });
@@ -92,8 +96,8 @@ export default function CustomerAlertsPage({ user }: { user: User }) {
   };
 
   // Summary stats
-  const totalRevAtRisk = filtered.reduce((s, a) => s + (a.total_revenue || 0), 0);
-  const avgDaysSilent = filtered.length > 0 ? Math.round(filtered.reduce((s, a) => s + a.days_since_last, 0) / filtered.length) : 0;
+  const totalRevAtRisk = filtered.reduce((s, a) => s + (Number(a.total_revenue) || 0), 0);
+  const avgDaysSilent = filtered.length > 0 ? Math.round(filtered.reduce((s, a) => s + Number(a.days_since_last), 0) / filtered.length) : 0;
 
   // Severity color based on days silent
   const severityColor = (days: number) => {
@@ -145,7 +149,7 @@ export default function CustomerAlertsPage({ user }: { user: User }) {
             <span className="text-xs font-medium text-green-700 uppercase">Avg Past Orders</span>
           </div>
           <div className="text-3xl font-bold text-green-800">
-            {filtered.length > 0 ? Math.round(filtered.reduce((s, a) => s + a.order_count, 0) / filtered.length) : 0}
+            {filtered.length > 0 ? Math.round(filtered.reduce((s, a) => s + Number(a.order_count), 0) / filtered.length) : 0}
           </div>
         </div>
       </div>

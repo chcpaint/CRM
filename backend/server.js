@@ -606,6 +606,14 @@ async function startServer() {
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
 
+  // ─── SHOP TARGETS (from PCR sync) ───
+  app.get('/api/sales/shop-targets', authenticate, async (req, res) => {
+    try {
+      const rows = await queryAll('SELECT shop_name, target, salesperson, install FROM pcr_shop_targets');
+      res.json({ targets: rows });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
   // ─── DASHBOARD ───
   app.get('/api/sales/dashboard/metrics', authenticate, async (req, res) => {
     try {

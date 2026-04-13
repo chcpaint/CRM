@@ -191,6 +191,7 @@ export default function SalesPage({ user }: Props) {
   const [parsePreview, setParsePreview] = useState<{ records: ParsedSale[]; summaries: CustomerSummary[]; reportPeriod: string } | null>(null);
   const [expandedPreview, setExpandedPreview] = useState<Set<number>>(new Set());
   const [expandedSale, setExpandedSale] = useState<string | null>(null);
+  const [shopTargets, setShopTargets] = useState<Map<string, { target: number; salesperson?: string; install?: string }>>(new Map());
   const fileRef = useRef<HTMLInputElement>(null);
 
   // Filters
@@ -198,7 +199,7 @@ export default function SalesPage({ user }: Props) {
   const [filterSalesperson, setFilterSalesperson] = useState<string>('');
   const [voiceMatchFeedback, setVoiceMatchFeedback] = useState<string>('');
 
-  useEffect(() => { loadSales(); }, []);
+  useEffect(() => { loadSales(); loadShopTargets(); }, []);
 
   // Handle ?customer= URL param (from voice navigation) — fuzzy match
   useEffect(() => {
@@ -280,6 +281,52 @@ export default function SalesPage({ user }: Props) {
     } finally {
       setLoading(false);
     }
+  };
+
+  const loadShopTargets = async () => {
+    try {
+      const data = await api.get('/sales/shop-targets');
+      const m = new Map<string, { target: number; salesperson?: string; install?: string }>();
+      (data.targets || []).forEach((t: any) => {
+        if (t?.shop_name) m.set(t.shop_name.toLowerCase().trim(), {
+          target: Number(t.target) || 0,
+          salesperson: t.salesperson || undefined,
+          install: t.install || undefined,
+        });
+      });
+      setShopTargets(m);
+    } catch (err) {
+      console.error('shop targets load failed', err);
+    }
+  };
+
+  // Build YTD breakdown for a customer's sales items
+  const buildBreakdown = (items: any[]) => {
+    const ytdYear = new Date().getFullYear();
+    const ytd = items.filter(it => (it.sale_date || '').startsWith(String(ytdYear)));
+    const ytdTotal = ytd.reduce((s, it) => s + (Number(it.sale_amount) || 0), 0);
+    const byCl1: Record<string, number> = {};
+    const byCl2: Record<string, number> = {};
+    for (const it of ytd) {
+      const cl1 = (it.category || '').trim() || 'Uncategorized';
+      const cl2 = (it.product_line || '').trim() || 'Uncategorized';
+      byCl1[cl1] = (byCl1[cl1] || 0) + (Number(it.sale_amount) || 0);
+      byCl2[cl2] = (byCl2[cl2] || 0) + (Number(it.sale_amount) || 0);
+    }
+    const sortDesc = (m: Record<string, number>) =>
+      Object.entries(m).sort((a, b) => b[1] - a[1]);
+    return { ytdTotal, ytdYear, cl1: sortDesc(byCl1), cl2: sortDesc(byCl2) };
+  };
+
+  const findTarget = (name: string): { target: number; salesperson?: string; install?: string } | null => {
+    if (!name) return null;
+    const key = name.toLowerCase().trim();
+    const exact = shopTargets.get(key);
+    if (exact) return exact;
+    for (const [k, v] of shopTargets) {
+      if (k.includes(key) || key.includes(k)) return v;
+    }
+    return null;
   };
 
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -706,8 +753,57 @@ export default function SalesPage({ user }: Props) {
                     ) : null;
                   })()}
                   {/* Expanded invoice detail */}
-                  {isExpanded && (
+                  {isExpanded && (() => {
+                    const bd = buildBreakdown(ct.items);
+                    const tgtRow = findTarget(ct.shop_name || ct.name);
+                    const annualTarget = tgtRow?.target || 0;
+                    const pctGoal = annualTarget > 0 ? (bd.ytdTotal / annualTarget) * 100 : null;
+                    return (
                     <div className="border-t border-navy-100 bg-navy-50">
+                      {/* YTD breakdown banner */}
+                      <div className="bg-white border-b border-navy-100 px-3 py-2">
+                        <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1 mb-2">
+                          <span className="text-[10px] font-bold uppercase tracking-wide text-navy-500">YTD {bd.ytdYear}</span>
+                          <span className="text-base font-bold text-green-700">{fmtMoney(bd.ytdTotal)}</span>
+                          {annualTarget > 0 ? (
+                            <>
+                              <span className="text-xs text-navy-500">/ {fmtMoney(annualTarget)}</span>
+                              <span className={`text-xs font-bold ${pctGoal! >= 100 ? 'text-green-600' : pctGoal! >= 75 ? 'text-amber-600' : 'text-red-600'}`}>
+                                {pctGoal!.toFixed(1)}%
+                              </span>
+                            </>
+                          ) : (
+                            <span className="text-xs text-navy-400 italic">no target</span>
+                          )}
+                        </div>
+                        {annualTarget > 0 && (
+                          <div className="bg-navy-100 rounded-full h-1.5 overflow-hidden mb-2">
+                            <div className={`h-full rounded-full ${pctGoal! >= 100 ? 'bg-green-500' : pctGoal! >= 75 ? 'bg-amber-500' : 'bg-red-500'}`} style={{ width: `${Math.min(pctGoal!, 100)}%` }} />
+                          </div>
+                        )}
+                        {(bd.cl1.length > 0 || bd.cl2.length > 0) && (
+                          <div className="grid grid-cols-2 gap-2">
+                            <div>
+                              <div className="text-[9px] font-bold uppercase tracking-wider text-navy-400 mb-1">Category</div>
+                              {bd.cl1.slice(0, 6).map(([name, amt]) => (
+                                <div key={name} className="flex justify-between text-[11px]">
+                                  <span className="truncate pr-1 text-navy-700">{name}</span>
+                                  <span className="font-mono tabular-nums text-navy-600">{fmtMoney(amt)}</span>
+                                </div>
+                              ))}
+                            </div>
+                            <div>
+                              <div className="text-[9px] font-bold uppercase tracking-wider text-navy-400 mb-1">Product Line</div>
+                              {bd.cl2.slice(0, 6).map(([name, amt]) => (
+                                <div key={name} className="flex justify-between text-[11px]">
+                                  <span className="truncate pr-1 text-navy-700">{name}</span>
+                                  <span className="font-mono tabular-nums text-navy-600">{fmtMoney(amt)}</span>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                      </div>
                       {hasDetailedItems ? (
                         <div className="divide-y divide-navy-200">
                           {invoiceGroups.map(([date, items], gi) => {
@@ -765,7 +861,8 @@ export default function SalesPage({ user }: Props) {
                         </div>
                       )}
                     </div>
-                  )}
+                    );
+                  })()}
                 </div>
               );
             })}
@@ -830,10 +927,80 @@ export default function SalesPage({ user }: Props) {
                           </tr>
                         ) : null;
                       })()}
-                      {isExpanded && (
+                      {isExpanded && (() => {
+                        const bd = buildBreakdown(ct.items);
+                        const tgtRow = findTarget(ct.shop_name || ct.name);
+                        const annualTarget = tgtRow?.target || 0;
+                        const pctGoal = annualTarget > 0 ? (bd.ytdTotal / annualTarget) * 100 : null;
+                        return (
                         <tr key={`${ct.name}-detail`}>
                           <td colSpan={6} className="p-0">
                             <div className="bg-navy-50 border-y border-navy-100">
+                              {/* Top banner: YTD breakdown + % to goal */}
+                              <div className="bg-white border-b border-navy-100 px-4 py-3">
+                                <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
+                                  <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1">
+                                    <span className="text-xs font-bold uppercase tracking-wide text-navy-500">YTD {bd.ytdYear}</span>
+                                    <span className="text-lg font-bold text-green-700">{fmtMoney(bd.ytdTotal)}</span>
+                                    {annualTarget > 0 && (
+                                      <>
+                                        <span className="text-xs text-navy-400">/</span>
+                                        <span className="text-sm font-semibold text-navy-700">{fmtMoney(annualTarget)} goal</span>
+                                        <span className={`text-sm font-bold ${pctGoal! >= 100 ? 'text-green-600' : pctGoal! >= 75 ? 'text-amber-600' : 'text-red-600'}`}>
+                                          {pctGoal!.toFixed(1)}%
+                                        </span>
+                                      </>
+                                    )}
+                                    {!annualTarget && (
+                                      <span className="text-xs text-navy-400 italic">no target set</span>
+                                    )}
+                                  </div>
+                                  {annualTarget > 0 && (
+                                    <div className="w-full sm:w-64 bg-navy-100 rounded-full h-2 overflow-hidden">
+                                      <div
+                                        className={`h-full rounded-full ${pctGoal! >= 100 ? 'bg-green-500' : pctGoal! >= 75 ? 'bg-amber-500' : 'bg-red-500'}`}
+                                        style={{ width: `${Math.min(pctGoal!, 100)}%` }}
+                                      />
+                                    </div>
+                                  )}
+                                </div>
+                                {(bd.cl1.length > 0 || bd.cl2.length > 0) && (
+                                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                                    {/* cl1: Product Category */}
+                                    <div>
+                                      <div className="text-[10px] font-bold uppercase tracking-wider text-navy-400 mb-1.5">Category</div>
+                                      <div className="space-y-1">
+                                        {bd.cl1.map(([name, amt]) => {
+                                          const pct = bd.ytdTotal > 0 ? (amt / bd.ytdTotal) * 100 : 0;
+                                          return (
+                                            <div key={name} className="flex items-center gap-2 text-xs">
+                                              <span className="flex-1 truncate text-navy-700">{name}</span>
+                                              <span className="font-mono text-navy-600 tabular-nums">{fmtMoney(amt)}</span>
+                                              <span className="font-mono text-navy-400 tabular-nums w-12 text-right">{pct.toFixed(1)}%</span>
+                                            </div>
+                                          );
+                                        })}
+                                      </div>
+                                    </div>
+                                    {/* cl2: Product Line / Brand */}
+                                    <div>
+                                      <div className="text-[10px] font-bold uppercase tracking-wider text-navy-400 mb-1.5">Product Line</div>
+                                      <div className="space-y-1">
+                                        {bd.cl2.map(([name, amt]) => {
+                                          const pct = bd.ytdTotal > 0 ? (amt / bd.ytdTotal) * 100 : 0;
+                                          return (
+                                            <div key={name} className="flex items-center gap-2 text-xs">
+                                              <span className="flex-1 truncate text-navy-700">{name}</span>
+                                              <span className="font-mono text-navy-600 tabular-nums">{fmtMoney(amt)}</span>
+                                              <span className="font-mono text-navy-400 tabular-nums w-12 text-right">{pct.toFixed(1)}%</span>
+                                            </div>
+                                          );
+                                        })}
+                                      </div>
+                                    </div>
+                                  </div>
+                                )}
+                              </div>
                               {hasDetailedItems ? (
                                 <div className="divide-y divide-navy-200">
                                   {invoiceGroups.map(([date, items], gi) => {
@@ -934,7 +1101,8 @@ export default function SalesPage({ user }: Props) {
                             </div>
                           </td>
                         </tr>
-                      )}
+                        );
+                      })()}
                     </>
                   );
                 })}

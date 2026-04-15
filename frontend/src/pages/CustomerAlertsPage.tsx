@@ -52,8 +52,10 @@ export default function CustomerAlertsPage({ user }: { user: User }) {
   const [expandedRow, setExpandedRow] = useState<string | null>(null);
   const [filterRep, setFilterRep] = useState('');
 
-  // Manager/admin dismiss controls
-  const canDismiss = user.role === 'admin' || user.role === 'manager';
+  // Anyone can dismiss/restore — every action is audited and reversible.
+  // `user` retained for future role-aware tweaks (e.g. show "by you" labels).
+  void user;
+  const canDismiss = true;
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [dismissModal, setDismissModal] = useState<{ open: boolean; targets: LapsedCustomer[] }>({ open: false, targets: [] });
   const [dismissReason, setDismissReason] = useState<DismissReason>('closed');

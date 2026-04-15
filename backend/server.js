@@ -2449,9 +2449,7 @@ async function startServer() {
   // Persists a dismissal row and, when an account is linked, drops a note on the account card.
   app.post('/api/customer-alerts/dismiss', authenticate, async (req, res) => {
     try {
-      if (req.user.role !== 'admin' && req.user.role !== 'manager') {
-        return res.status(403).json({ error: 'Admin or manager access required' });
-      }
+      // Open to any authenticated user — every dismissal is audited and reversible.
       const { customer_name, reason, notes, account_id } = req.body || {};
       if (!customer_name || typeof customer_name !== 'string') return res.status(400).json({ error: 'customer_name required' });
       const allowedReasons = ['closed', 'no_longer_ppg', 'other'];
@@ -2498,9 +2496,6 @@ async function startServer() {
   // ─── LIST currently-dismissed customers (admin/manager only) ───
   app.get('/api/customer-alerts/dismissed', authenticate, async (req, res) => {
     try {
-      if (req.user.role !== 'admin' && req.user.role !== 'manager') {
-        return res.status(403).json({ error: 'Admin or manager access required' });
-      }
       const rows = await queryAll(
         `SELECT d.id, d.customer_name, d.reason, d.notes, d.account_id, d.dismissed_at,
                 u.first_name AS by_first_name, u.last_name AS by_last_name
@@ -2515,9 +2510,6 @@ async function startServer() {
   // ─── RESTORE (un-dismiss) a customer back onto the alerts page ───
   app.delete('/api/customer-alerts/dismiss/:id', authenticate, async (req, res) => {
     try {
-      if (req.user.role !== 'admin' && req.user.role !== 'manager') {
-        return res.status(403).json({ error: 'Admin or manager access required' });
-      }
       const row = await queryOne('SELECT * FROM customer_alert_dismissals WHERE id=$1', [req.params.id]);
       if (!row) return res.status(404).json({ error: 'Not found' });
       await execute('DELETE FROM customer_alert_dismissals WHERE id=$1', [req.params.id]);

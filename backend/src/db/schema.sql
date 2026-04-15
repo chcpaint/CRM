@@ -306,3 +306,23 @@ CREATE INDEX IF NOT EXISTS idx_accounts_category ON accounts(account_category);
 CREATE INDEX IF NOT EXISTS idx_accounts_branch ON accounts(branch);
 CREATE INDEX IF NOT EXISTS idx_accounts_secondary_rep ON accounts(secondary_rep_id);
 CREATE INDEX IF NOT EXISTS idx_accounts_pcr_managed ON accounts(pcr_managed) WHERE pcr_managed = true;
+
+-- ─── AUDIT LOG APPEND-ONLY PROTECTION ───────────────────────────────
+-- The audit_log is forensic evidence; reject any UPDATE or DELETE attempts
+-- at the database level so even a compromised backend cannot alter history.
+CREATE OR REPLACE FUNCTION audit_log_block_modify() RETURNS trigger AS $$
+BEGIN
+  RAISE EXCEPTION 'audit_log is append-only: % is not permitted', TG_OP
+    USING ERRCODE = 'insufficient_privilege';
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS audit_log_no_update ON audit_log;
+CREATE TRIGGER audit_log_no_update
+  BEFORE UPDATE ON audit_log
+  FOR EACH ROW EXECUTE FUNCTION audit_log_block_modify();
+
+DROP TRIGGER IF EXISTS audit_log_no_delete ON audit_log;
+CREATE TRIGGER audit_log_no_delete
+  BEFORE DELETE ON audit_log
+  FOR EACH ROW EXECUTE FUNCTION audit_log_block_modify();

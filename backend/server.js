@@ -11,8 +11,67 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const cron = require('node-cron');
 const { Resend } = require('resend');
+const { z } = require('zod');
 const { initDatabase, queryAll, queryOne, execute, getPool } = require('./src/db/init');
 const { runGDriveImport } = require('./src/gdrive-import');
+
+// ─── Validation schemas ───
+// All fields optional so partial updates are allowed; types/constraints enforced.
+const emailStr = z.string().trim().email().max(320);
+const shortStr = (max) => z.string().trim().max(max);
+const dateStr  = z.string().regex(/^\d{4}-\d{2}-\d{2}(T.*)?$/, 'must be ISO date').nullable().optional();
+const boolish  = z.union([z.boolean(), z.literal(0), z.literal(1), z.literal('true'), z.literal('false')]).transform(v => !!v && v !== 'false');
+const intOrNull = z.union([z.number().int(), z.string().regex(/^\d+$/).transform(Number), z.null()]).optional();
+const numOrNull = z.union([z.number(), z.string().regex(/^-?\d+(\.\d+)?$/).transform(Number), z.null()]).optional();
+
+const accountUpdateSchema = z.object({
+  shop_name: shortStr(200).optional(),
+  address: shortStr(300).nullable().optional(),
+  city: shortStr(100).nullable().optional(),
+  area: shortStr(100).nullable().optional(),
+  province: shortStr(10).nullable().optional(),
+  contact_names: shortStr(500).nullable().optional(),
+  phone: shortStr(50).nullable().optional(),
+  phone2: shortStr(50).nullable().optional(),
+  email: z.union([emailStr, z.literal(''), z.null()]).optional(),
+  account_type: z.enum(['collision', 'mechanical', 'dealership', 'restoration', 'other']).optional(),
+  assigned_rep_id: intOrNull,
+  secondary_rep_id: intOrNull,
+  status: z.enum(['prospect', 'active', 'cold', 'dnc', 'churned', 'on_hold']).optional(),
+  suppliers: shortStr(500).nullable().optional(),
+  paint_line: shortStr(200).nullable().optional(),
+  allied_products: shortStr(500).nullable().optional(),
+  sundries: shortStr(500).nullable().optional(),
+  has_contract: boolish.optional(),
+  mpo: shortStr(100).nullable().optional(),
+  num_techs: intOrNull,
+  num_painters: intOrNull,
+  num_body_men: intOrNull,
+  num_paint_booths: intOrNull,
+  sq_footage: shortStr(50).nullable().optional(),
+  annual_revenue: numOrNull,
+  former_sherwin_client: boolish.optional(),
+  follow_up_date: dateStr,
+  tags: z.array(z.string().max(50)).max(50).optional(),
+  account_category: z.enum(['lead', 'customer', 'prospect', 'inactive']).optional(),
+  branch: shortStr(100).nullable().optional(),
+  postal_code: shortStr(20).nullable().optional(),
+  cup_brand: shortStr(100).nullable().optional(),
+  paper_brand: shortStr(100).nullable().optional(),
+  filler_brand: shortStr(100).nullable().optional(),
+  contract_status: shortStr(50).nullable().optional(),
+  deal_details: shortStr(2000).nullable().optional(),
+  banner: shortStr(100).nullable().optional(),
+  business_types: z.array(z.string().max(50)).max(20).optional(),
+  business_type_notes: shortStr(2000).nullable().optional(),
+  contract_file_path: shortStr(500).nullable().optional(),
+  contract_expiration_date: dateStr,
+  phone_numbers: z.any().optional(),
+  email_addresses: z.any().optional(),
+  pcr_managed: boolish.optional(),
+  pcr_shop_name: shortStr(200).nullable().optional(),
+  skip_duplicate_check: boolish.optional(),
+}).passthrough();
 
 // ─── EMAIL (RESEND) ───
 const resend = process.env.RESEND_API_KEY ? new Resend(process.env.RESEND_API_KEY) : null;
@@ -135,9 +194,26 @@ async function startServer() {
 
   app.use(helmet({ contentSecurityPolicy: false, crossOriginEmbedderPolicy: false }));
   app.use(compression());
-  const corsOrigin = process.env.NODE_ENV === 'production'
-    ? (process.env.CORS_ORIGIN || true)
-    : 'http://localhost:5173';
+  // CORS: in production require an explicit allow-list via CORS_ORIGIN (comma-separated).
+  // Never fall through to `true` (reflect any origin) in production.
+  let corsOrigin;
+  if (process.env.NODE_ENV === 'production') {
+    const raw = process.env.CORS_ORIGIN;
+    if (!raw) {
+      console.warn('[SECURITY] CORS_ORIGIN not set in production — rejecting all cross-origin requests.');
+      corsOrigin = false;
+    } else {
+      const allowList = raw.split(',').map(s => s.trim()).filter(Boolean);
+      corsOrigin = (origin, cb) => {
+        // Same-origin / server-to-server requests have no Origin header — allow them.
+        if (!origin) return cb(null, true);
+        if (allowList.includes(origin)) return cb(null, true);
+        return cb(new Error('CORS: origin not allowed'));
+      };
+    }
+  } else {
+    corsOrigin = 'http://localhost:5173';
+  }
   app.use(cors({ origin: corsOrigin, credentials: true }));
   app.use(cookieParser());
   app.use(express.json({ limit: '10mb' }));
@@ -287,6 +363,11 @@ async function startServer() {
   });
 
   app.get('/api/accounts/export/csv', authenticate, async (req, res) => {
+    // Bulk export of the entire account book is privileged — admins/managers only.
+    if (req.user.role !== 'admin' && req.user.role !== 'manager') {
+      return res.status(403).json({ error: 'Admin or manager access required' });
+    }
+    await logAudit(req, 'account', 0, 'export_csv', { count: 'all' });
     const accounts = await queryAll('SELECT a.*, u.first_name as rfn, u.last_name as rln FROM accounts a LEFT JOIN users u ON a.assigned_rep_id=u.id WHERE a.deleted_at IS NULL ORDER BY a.shop_name');
     const hdr = 'Shop Name,City,Contact,Phone,Email,Status,Rep\n';
     const rows = accounts.map(a => `"${a.shop_name}","${a.city||''}","${a.contact_names||''}","${a.phone||''}","${a.email||''}","${a.status}","${a.rfn||''} ${a.rln||''}"`).join('\n');
@@ -298,6 +379,14 @@ async function startServer() {
     try {
       const account = await queryOne('SELECT a.*, u.first_name as rep_first_name, u.last_name as rep_last_name, u2.first_name as secondary_rep_first_name, u2.last_name as secondary_rep_last_name FROM accounts a LEFT JOIN users u ON a.assigned_rep_id=u.id LEFT JOIN users u2 ON a.secondary_rep_id=u2.id WHERE a.id=$1 AND a.deleted_at IS NULL', [req.params.id]);
       if (!account) return res.status(404).json({ error: 'Not found' });
+      // Reps can only view accounts they are assigned to (primary or secondary).
+      // Managers and admins see everything.
+      if (req.user.role === 'rep') {
+        const uid = req.user.userId;
+        if (account.assigned_rep_id !== uid && account.secondary_rep_id !== uid) {
+          return res.status(403).json({ error: 'You do not have access to this account' });
+        }
+      }
       const notes = await queryAll('SELECT n.*, u.first_name, u.last_name FROM notes n JOIN users u ON n.created_by_id=u.id WHERE n.account_id=$1 ORDER BY n.created_at DESC', [req.params.id]);
       // Reps see only their own activities; managers/admins see all
       const isRep = req.user.role === 'rep';
@@ -336,8 +425,21 @@ async function startServer() {
 
   app.put('/api/accounts/:id', authenticate, async (req, res) => {
     try {
+      // Validate shape + reject oversized/malformed fields before hitting the DB.
+      const parsed = accountUpdateSchema.safeParse(req.body);
+      if (!parsed.success) {
+        return res.status(400).json({ error: 'Invalid input', details: parsed.error.issues.slice(0, 5).map(i => ({ path: i.path.join('.'), message: i.message })) });
+      }
+      req.body = { ...req.body, ...parsed.data };
       const existing = await queryOne('SELECT * FROM accounts WHERE id=$1 AND deleted_at IS NULL', [req.params.id]);
       if (!existing) return res.status(404).json({ error: 'Not found' });
+      // Reps can only modify accounts they are assigned to.
+      if (req.user.role === 'rep') {
+        const uid = req.user.userId;
+        if (existing.assigned_rep_id !== uid && existing.secondary_rep_id !== uid) {
+          return res.status(403).json({ error: 'You do not have access to this account' });
+        }
+      }
 
       // ─── PCR Guard: prevent manual promotion to Active Customer ───
       // Active customers are controlled by the AccountEdge/PCR file.
@@ -1783,10 +1885,20 @@ async function startServer() {
           diagnostics[t] = { exists: false, error: e.message };
         }
       }
-      // Check cron jobs
+      // Check cron jobs — REDACT sync keys, bearer tokens, and other secrets before returning.
       try {
         const cronJobs = await queryAll("SELECT jobid, schedule, command, nodename, active FROM cron.job ORDER BY jobid");
-        diagnostics.cron_jobs = cronJobs;
+        const redact = (cmd) => {
+          if (typeof cmd !== 'string') return cmd;
+          return cmd
+            // x-sync-key header values
+            .replace(/(x-sync-key['"]*\s*,\s*['"])([^'"]+)(['"])/gi, '$1[REDACTED]$3')
+            // Authorization: Bearer <token>
+            .replace(/(Authorization['"]*\s*,\s*['"]?Bearer\s+)([^'"\s]+)/gi, '$1[REDACTED]')
+            // Any key-looking token (long base64/hex)
+            .replace(/([a-zA-Z0-9_-]{40,})/g, '[REDACTED]');
+        };
+        diagnostics.cron_jobs = cronJobs.map(j => ({ ...j, command: redact(j.command) }));
       } catch (e) {
         diagnostics.cron_jobs = { error: e.message };
       }

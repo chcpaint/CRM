@@ -10,6 +10,8 @@ interface CMIItem {
   filename: string;
   mime_type: string;
   file_size: number;
+  manufacturer: string | null;
+  product_codes: string | null;
   created_at: string;
   updated_at: string;
   uploaded_by_id: number | null;
@@ -31,6 +33,8 @@ export default function CompetitiveMarketInfoPage({ user }: { user: User }) {
   const [file, setFile] = useState<File | null>(null);
   const [title, setTitle] = useState('');
   const [notes, setNotes] = useState('');
+  const [manufacturer, setManufacturer] = useState('');
+  const [productCodes, setProductCodes] = useState('');
   const [uploading, setUploading] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -38,6 +42,8 @@ export default function CompetitiveMarketInfoPage({ user }: { user: User }) {
   const [editing, setEditing] = useState<CMIItem | null>(null);
   const [editTitle, setEditTitle] = useState('');
   const [editNotes, setEditNotes] = useState('');
+  const [editManufacturer, setEditManufacturer] = useState('');
+  const [editProductCodes, setEditProductCodes] = useState('');
   const [savingEdit, setSavingEdit] = useState(false);
 
   const [previewItem, setPreviewItem] = useState<CMIItem | null>(null);
@@ -68,12 +74,16 @@ export default function CompetitiveMarketInfoPage({ user }: { user: User }) {
   const isImage = (mt: string) => mt?.startsWith('image/');
   const isPdf = (mt: string) => mt === 'application/pdf';
 
+  // Smart search: split the query into terms (space or comma separated) and require
+  // every term to match somewhere — title, notes, filename, manufacturer, or any
+  // SKU/product code. This lets reps search "ppg DBC500" or "3M, P800" instinctively.
   const filtered = items.filter(it => {
-    if (!search) return true;
-    const q = search.toLowerCase();
-    return (it.title || '').toLowerCase().includes(q)
-      || (it.notes || '').toLowerCase().includes(q)
-      || (it.filename || '').toLowerCase().includes(q);
+    if (!search.trim()) return true;
+    const haystack = [
+      it.title, it.notes, it.filename, it.manufacturer, it.product_codes,
+    ].filter(Boolean).join(' \u0001 ').toLowerCase();
+    const terms = search.toLowerCase().split(/[\s,]+/).filter(Boolean);
+    return terms.every(t => haystack.includes(t));
   });
 
   // ─── Upload ───
@@ -93,7 +103,7 @@ export default function CompetitiveMarketInfoPage({ user }: { user: User }) {
   };
 
   const resetUploadForm = () => {
-    setFile(null); setTitle(''); setNotes('');
+    setFile(null); setTitle(''); setNotes(''); setManufacturer(''); setProductCodes('');
     if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
@@ -106,6 +116,8 @@ export default function CompetitiveMarketInfoPage({ user }: { user: User }) {
       fd.append('file', file);
       fd.append('title', title.trim());
       if (notes.trim()) fd.append('notes', notes.trim());
+      if (manufacturer.trim()) fd.append('manufacturer', manufacturer.trim());
+      if (productCodes.trim()) fd.append('product_codes', productCodes.trim());
       await api.upload('/competitive-market-info', fd);
       resetUploadForm();
       setUploadOpen(false);
@@ -119,14 +131,23 @@ export default function CompetitiveMarketInfoPage({ user }: { user: User }) {
 
   // ─── Edit ───
   const openEdit = (it: CMIItem) => {
-    setEditing(it); setEditTitle(it.title); setEditNotes(it.notes || '');
+    setEditing(it);
+    setEditTitle(it.title);
+    setEditNotes(it.notes || '');
+    setEditManufacturer(it.manufacturer || '');
+    setEditProductCodes(it.product_codes || '');
   };
   const saveEdit = async () => {
     if (!editing) return;
     if (!editTitle.trim()) return;
     setSavingEdit(true);
     try {
-      await api.patch(`/competitive-market-info/${editing.id}`, { title: editTitle.trim(), notes: editNotes.trim() || null });
+      await api.patch(`/competitive-market-info/${editing.id}`, {
+        title: editTitle.trim(),
+        notes: editNotes.trim() || null,
+        manufacturer: editManufacturer.trim() || null,
+        product_codes: editProductCodes.trim() || null,
+      });
       setEditing(null);
       load();
     } catch (e: any) {
@@ -221,15 +242,32 @@ export default function CompetitiveMarketInfoPage({ user }: { user: User }) {
       </div>
 
       {/* Search */}
-      <div className="relative">
-        <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-navy-400" />
-        <input
-          type="text"
-          placeholder="Search by title, notes, or filename…"
-          value={search}
-          onChange={e => setSearch(e.target.value)}
-          className="input-field pl-10 w-full"
-        />
+      <div>
+        <div className="relative">
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-navy-400" />
+          <input
+            type="text"
+            placeholder="Search by manufacturer, SKU, product code, title, notes, or filename…"
+            value={search}
+            onChange={e => setSearch(e.target.value)}
+            className="input-field pl-10 pr-10 w-full"
+          />
+          {search && (
+            <button
+              onClick={() => setSearch('')}
+              className="absolute right-3 top-1/2 -translate-y-1/2 text-navy-400 hover:text-navy-600"
+              aria-label="Clear search"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          )}
+        </div>
+        <div className="text-[11px] text-navy-400 mt-1.5 pl-1">
+          Tip: type multiple terms separated by spaces or commas (e.g. <span className="font-mono text-navy-500">PPG DBC500</span> or <span className="font-mono text-navy-500">3M, P800</span>) — every term must match.
+          {filtered.length !== items.length && (
+            <span className="ml-2 text-navy-600 font-medium">{filtered.length} of {items.length} match</span>
+          )}
+        </div>
       </div>
 
       {error && <div className="bg-red-50 border border-red-200 text-red-700 p-3 rounded-lg text-sm">{error}</div>}
@@ -262,6 +300,21 @@ export default function CompetitiveMarketInfoPage({ user }: { user: User }) {
                     <div className="text-xs text-navy-400 truncate">{it.filename} · {fmtSize(it.file_size)}</div>
                   </div>
                 </button>
+
+                {(it.manufacturer || it.product_codes) && (
+                  <div className="flex flex-wrap gap-1.5 mb-3">
+                    {it.manufacturer && (
+                      <span className="inline-flex items-center px-2 py-0.5 rounded-md bg-brand-50 text-brand-700 text-[11px] font-semibold">
+                        {it.manufacturer}
+                      </span>
+                    )}
+                    {it.product_codes && it.product_codes.split(/[\s,]+/).filter(Boolean).slice(0, 6).map((code, i) => (
+                      <span key={i} className="inline-flex items-center px-2 py-0.5 rounded-md bg-navy-100 text-navy-700 text-[11px] font-mono">
+                        {code}
+                      </span>
+                    ))}
+                  </div>
+                )}
 
                 {it.notes && (
                   <div className="text-sm text-navy-600 whitespace-pre-wrap mb-3 line-clamp-4">{it.notes}</div>
@@ -335,6 +388,38 @@ export default function CompetitiveMarketInfoPage({ user }: { user: User }) {
               />
             </div>
 
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <label className="block text-xs font-semibold text-navy-700 uppercase mb-1.5">
+                  Manufacturer <span className="text-navy-400 normal-case font-normal">(optional)</span>
+                </label>
+                <input
+                  type="text"
+                  maxLength={100}
+                  value={manufacturer}
+                  onChange={e => setManufacturer(e.target.value)}
+                  placeholder="e.g. PPG, 3M, BASF, NAPA"
+                  className="input-field w-full"
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-semibold text-navy-700 uppercase mb-1.5">
+                  Product codes / SKUs <span className="text-navy-400 normal-case font-normal">(optional)</span>
+                </label>
+                <input
+                  type="text"
+                  maxLength={500}
+                  value={productCodes}
+                  onChange={e => setProductCodes(e.target.value)}
+                  placeholder="DBC500, P800, 05887…"
+                  className="input-field w-full"
+                />
+              </div>
+            </div>
+            <div className="text-[11px] text-navy-400 -mt-2 pl-1">
+              These fields make this upload findable later when the team searches.
+            </div>
+
             <div>
               <label className="block text-xs font-semibold text-navy-700 uppercase mb-1.5">Notes <span className="text-navy-400 normal-case font-normal">(optional)</span></label>
               <textarea
@@ -375,6 +460,30 @@ export default function CompetitiveMarketInfoPage({ user }: { user: User }) {
                 onChange={e => setEditTitle(e.target.value)}
                 className="input-field w-full"
               />
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <label className="block text-xs font-semibold text-navy-700 uppercase mb-1.5">Manufacturer</label>
+                <input
+                  type="text"
+                  maxLength={100}
+                  value={editManufacturer}
+                  onChange={e => setEditManufacturer(e.target.value)}
+                  placeholder="e.g. PPG, 3M, BASF"
+                  className="input-field w-full"
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-semibold text-navy-700 uppercase mb-1.5">Product codes / SKUs</label>
+                <input
+                  type="text"
+                  maxLength={500}
+                  value={editProductCodes}
+                  onChange={e => setEditProductCodes(e.target.value)}
+                  placeholder="DBC500, P800…"
+                  className="input-field w-full"
+                />
+              </div>
             </div>
             <div>
               <label className="block text-xs font-semibold text-navy-700 uppercase mb-1.5">Notes</label>

@@ -563,6 +563,7 @@ async function startServer() {
     try {
       const rows = await queryAll(`
         SELECT c.id, c.title, c.notes, c.filename, c.mime_type, c.file_size,
+               c.manufacturer, c.product_codes,
                c.created_at, c.updated_at, c.uploaded_by_id,
                u.first_name AS by_first_name, u.last_name AS by_last_name
         FROM competitive_market_info c
@@ -579,15 +580,17 @@ async function startServer() {
       if (!req.file) return res.status(400).json({ error: 'File required (PDF or image, max 15MB)' });
       const title = (req.body.title || '').toString().trim();
       const notes = (req.body.notes || '').toString().trim() || null;
+      const manufacturer = (req.body.manufacturer || '').toString().trim().slice(0, 200) || null;
+      const productCodes = (req.body.product_codes || '').toString().trim().slice(0, 2000) || null;
       if (!title) return res.status(400).json({ error: 'Title required' });
       if (title.length > 200) return res.status(400).json({ error: 'Title too long (max 200 chars)' });
 
       const { lastId } = await execute(
-        `INSERT INTO competitive_market_info (title, notes, filename, mime_type, file_size, file_data, uploaded_by_id)
-         VALUES ($1,$2,$3,$4,$5,$6,$7)`,
-        [title, notes, req.file.originalname, req.file.mimetype || 'application/octet-stream', req.file.size, req.file.buffer, req.user.userId]
+        `INSERT INTO competitive_market_info (title, notes, filename, mime_type, file_size, file_data, uploaded_by_id, manufacturer, product_codes)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+        [title, notes, req.file.originalname, req.file.mimetype || 'application/octet-stream', req.file.size, req.file.buffer, req.user.userId, manufacturer, productCodes]
       );
-      await logAudit(req, 'competitive_market_info', lastId, 'create', { title, filename: req.file.originalname, size: req.file.size });
+      await logAudit(req, 'competitive_market_info', lastId, 'create', { title, filename: req.file.originalname, size: req.file.size, manufacturer });
       res.status(201).json({ id: lastId, title, filename: req.file.originalname });
     } catch (e) {
       console.error('CMI upload error:', e);
@@ -615,6 +618,14 @@ async function startServer() {
       if (req.body.notes !== undefined) {
         const n = req.body.notes === null ? null : String(req.body.notes).trim() || null;
         updates.push(`notes = $${i++}`); params.push(n); changes.notes = { from: row.notes, to: n };
+      }
+      if (req.body.manufacturer !== undefined) {
+        const m = req.body.manufacturer === null ? null : String(req.body.manufacturer).trim().slice(0, 200) || null;
+        updates.push(`manufacturer = $${i++}`); params.push(m); changes.manufacturer = { from: row.manufacturer, to: m };
+      }
+      if (req.body.product_codes !== undefined) {
+        const p = req.body.product_codes === null ? null : String(req.body.product_codes).trim().slice(0, 2000) || null;
+        updates.push(`product_codes = $${i++}`); params.push(p); changes.product_codes = { from: row.product_codes, to: p };
       }
       params.push(req.params.id);
       await execute(`UPDATE competitive_market_info SET ${updates.join(', ')} WHERE id = $${i}`, params);

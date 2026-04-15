@@ -359,3 +359,15 @@ CREATE TABLE IF NOT EXISTS competitive_market_info (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS idx_competitive_market_info_created ON competitive_market_info(created_at DESC);
+
+-- Add structured search fields to competitive_market_info so reps can pull up
+-- a promo by manufacturer name, SKU, or product code without scanning notes.
+DO $$ BEGIN
+  ALTER TABLE competitive_market_info ADD COLUMN manufacturer TEXT;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+DO $$ BEGIN
+  ALTER TABLE competitive_market_info ADD COLUMN product_codes TEXT;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+CREATE INDEX IF NOT EXISTS idx_cmi_manufacturer_lower ON competitive_market_info (LOWER(manufacturer));

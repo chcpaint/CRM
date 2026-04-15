@@ -2778,10 +2778,45 @@ async function startServer() {
   //  END daily-report / comments / notifications block
   // ============================================================================
 
-  // Serve frontend
+  // Build version — Render sets RENDER_GIT_COMMIT automatically on every deploy
+  const BUILD_VERSION = process.env.RENDER_GIT_COMMIT || process.env.GIT_COMMIT || 'dev';
+  const BUILD_STARTED_AT = new Date().toISOString();
+
+  // Lightweight endpoint the frontend polls to detect new deploys
+  app.get('/api/version', (_req, res) => {
+    res.set('Cache-Control', 'no-store, must-revalidate');
+    res.json({ version: BUILD_VERSION, startedAt: BUILD_STARTED_AT });
+  });
+
+  // Serve frontend static assets.
+  // Hashed bundles in /assets can be cached for a year (filenames change on rebuild).
+  // index.html MUST NOT be cached — otherwise users stay pinned to old bundle hashes.
   const frontendPath = path.join(__dirname, '../frontend/dist');
-  app.use(express.static(frontendPath));
-  app.get('*', (req, res) => { if (!req.path.startsWith('/api')) res.sendFile(path.join(frontendPath, 'index.html')); });
+  app.use(express.static(frontendPath, {
+    etag: true,
+    lastModified: true,
+    maxAge: 0,
+    setHeaders: (res, filePath) => {
+      if (filePath.includes(`${path.sep}assets${path.sep}`)) {
+        // Hashed Vite assets — safe to cache forever
+        res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+      } else if (filePath.endsWith('index.html')) {
+        res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+        res.setHeader('Pragma', 'no-cache');
+        res.setHeader('Expires', '0');
+      } else {
+        res.setHeader('Cache-Control', 'no-cache');
+      }
+    },
+  }));
+  app.get('*', (req, res) => {
+    if (req.path.startsWith('/api')) return;
+    // Same no-cache headers for the SPA fallback route
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+    res.sendFile(path.join(frontendPath, 'index.html'));
+  });
 
   app.listen(PORT, '0.0.0.0', async () => {
     console.log(`\n  CRM - CHC Paint & Auto Body Supplies`);

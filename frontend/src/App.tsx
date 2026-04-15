@@ -12,6 +12,7 @@ import DailyReportPage from './pages/DailyReportPage';
 import HoldsPage from './pages/HoldsPage';
 import CustomerAlertsPage from './pages/CustomerAlertsPage';
 import Layout from './components/layout/Layout';
+import UpdateBanner from './components/UpdateBanner';
 
 export default function App() {
   const [user, setUser] = useState<User | null>(null);
@@ -68,6 +69,7 @@ export default function App() {
 
   return (
     <Layout user={user} onLogout={handleLogout}>
+      <UpdateBanner />
       <Routes>
         <Route path="/" element={<DashboardPage user={user} />} />
         <Route path="/accounts" element={<AccountsPage user={user} />} />

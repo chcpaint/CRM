@@ -38,8 +38,8 @@ export default {
         'glass-sm': '0 4px 16px 0 rgba(13, 27, 42, 0.12)',
         'glow-red': '0 0 20px rgba(230, 57, 70, 0.3)',
         'glow-blue': '0 0 20px rgba(13, 27, 42, 0.4)',
-        'card': '0 1px 3px rgba(13, 27, 42, 0.06), 0 6px 16px rgba(13, 27, 42, 0.06)',
-        'card-hover': '0 4px 12px rgba(13, 27, 42, 0.1), 0 12px 32px rgba(13, 27, 42, 0.1)',
+        'card': '0 1px 3px rgba(13, 27, 42, 0.18), 0 10px 28px rgba(13, 27, 42, 0.14), 0 0 0 1px rgba(255,255,255,0.65), 0 0 28px 2px rgba(255,255,255,0.55)',
+        'card-hover': '0 4px 12px rgba(13, 27, 42, 0.22), 0 18px 44px rgba(13, 27, 42, 0.18), 0 0 0 1px rgba(255,255,255,0.85), 0 0 42px 4px rgba(255,255,255,0.7)',
         'inset-glow': 'inset 0 1px 0 0 rgba(255,255,255,0.1)',
       },
       backgroundImage: {

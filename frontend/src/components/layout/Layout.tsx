@@ -32,7 +32,7 @@ export default function Layout({ user, onLogout, children }: LayoutProps) {
     path === '/' ? location.pathname === '/' : location.pathname.startsWith(path);
 
   return (
-    <div className="min-h-screen bg-navy-50">
+    <div className="min-h-screen">
       {/* Top navbar */}
       <header className="bg-navy-900 text-white shadow-lg fixed top-0 left-0 right-0 z-50">
         <div className="flex items-center justify-between px-3 sm:px-4 h-14 sm:h-16 gap-2">

@@ -545,6 +545,111 @@ async function startServer() {
     res.sendFile(filePath);
   });
 
+  // ─── COMPETITIVE MARKET INFO ───
+  // Promo flyers, competitor price lists, scans. File bytes stored in Postgres
+  // (bytea) so they survive Render deploys without a persistent disk.
+  const cmiUpload = multer({
+    storage: multer.memoryStorage(),
+    limits: { fileSize: 15 * 1024 * 1024 }, // 15MB per file
+    fileFilter: (req, file, cb) => {
+      const allowed = ['.pdf', '.png', '.jpg', '.jpeg', '.webp', '.heic', '.gif', '.tif', '.tiff'];
+      const ext = path.extname(file.originalname).toLowerCase();
+      cb(null, allowed.includes(ext));
+    }
+  });
+
+  // List all entries (no file bytes — just metadata)
+  app.get('/api/competitive-market-info', authenticate, async (req, res) => {
+    try {
+      const rows = await queryAll(`
+        SELECT c.id, c.title, c.notes, c.filename, c.mime_type, c.file_size,
+               c.created_at, c.updated_at, c.uploaded_by_id,
+               u.first_name AS by_first_name, u.last_name AS by_last_name
+        FROM competitive_market_info c
+        LEFT JOIN users u ON c.uploaded_by_id = u.id
+        ORDER BY c.created_at DESC
+      `);
+      res.json({ items: rows });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
+  // Upload a new entry — multipart/form-data with `file` + `title` + optional `notes`
+  app.post('/api/competitive-market-info', authenticate, cmiUpload.single('file'), async (req, res) => {
+    try {
+      if (!req.file) return res.status(400).json({ error: 'File required (PDF or image, max 15MB)' });
+      const title = (req.body.title || '').toString().trim();
+      const notes = (req.body.notes || '').toString().trim() || null;
+      if (!title) return res.status(400).json({ error: 'Title required' });
+      if (title.length > 200) return res.status(400).json({ error: 'Title too long (max 200 chars)' });
+
+      const { lastId } = await execute(
+        `INSERT INTO competitive_market_info (title, notes, filename, mime_type, file_size, file_data, uploaded_by_id)
+         VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+        [title, notes, req.file.originalname, req.file.mimetype || 'application/octet-stream', req.file.size, req.file.buffer, req.user.userId]
+      );
+      await logAudit(req, 'competitive_market_info', lastId, 'create', { title, filename: req.file.originalname, size: req.file.size });
+      res.status(201).json({ id: lastId, title, filename: req.file.originalname });
+    } catch (e) {
+      console.error('CMI upload error:', e);
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // Edit title / notes (uploader or admin/manager)
+  app.patch('/api/competitive-market-info/:id', authenticate, async (req, res) => {
+    try {
+      const row = await queryOne('SELECT * FROM competitive_market_info WHERE id=$1', [req.params.id]);
+      if (!row) return res.status(404).json({ error: 'Not found' });
+      const isOwner = row.uploaded_by_id === req.user.userId;
+      const isPriv = req.user.role === 'admin' || req.user.role === 'manager';
+      if (!isOwner && !isPriv) return res.status(403).json({ error: 'You can only edit your own uploads' });
+
+      const updates = ['updated_at = NOW()']; const params = []; let i = 1;
+      const changes = {};
+      if (typeof req.body.title === 'string') {
+        const t = req.body.title.trim();
+        if (!t) return res.status(400).json({ error: 'Title cannot be empty' });
+        if (t.length > 200) return res.status(400).json({ error: 'Title too long' });
+        updates.push(`title = $${i++}`); params.push(t); changes.title = { from: row.title, to: t };
+      }
+      if (req.body.notes !== undefined) {
+        const n = req.body.notes === null ? null : String(req.body.notes).trim() || null;
+        updates.push(`notes = $${i++}`); params.push(n); changes.notes = { from: row.notes, to: n };
+      }
+      params.push(req.params.id);
+      await execute(`UPDATE competitive_market_info SET ${updates.join(', ')} WHERE id = $${i}`, params);
+      await logAudit(req, 'competitive_market_info', parseInt(req.params.id), 'update', changes);
+      res.json({ ok: true });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
+  // Stream the file (inline so PDFs/images render in browser)
+  app.get('/api/competitive-market-info/:id/file', authenticate, async (req, res) => {
+    try {
+      const row = await queryOne('SELECT filename, mime_type, file_data FROM competitive_market_info WHERE id=$1', [req.params.id]);
+      if (!row) return res.status(404).json({ error: 'Not found' });
+      const disposition = req.query.download === '1' ? 'attachment' : 'inline';
+      res.setHeader('Content-Type', row.mime_type || 'application/octet-stream');
+      res.setHeader('Content-Disposition', `${disposition}; filename="${row.filename.replace(/"/g, '')}"`);
+      res.setHeader('Cache-Control', 'private, max-age=300');
+      res.send(row.file_data);
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
+  // Delete (uploader or admin/manager)
+  app.delete('/api/competitive-market-info/:id', authenticate, async (req, res) => {
+    try {
+      const row = await queryOne('SELECT id, title, uploaded_by_id FROM competitive_market_info WHERE id=$1', [req.params.id]);
+      if (!row) return res.status(404).json({ error: 'Not found' });
+      const isOwner = row.uploaded_by_id === req.user.userId;
+      const isPriv = req.user.role === 'admin' || req.user.role === 'manager';
+      if (!isOwner && !isPriv) return res.status(403).json({ error: 'You can only delete your own uploads' });
+      await execute('DELETE FROM competitive_market_info WHERE id=$1', [req.params.id]);
+      await logAudit(req, 'competitive_market_info', parseInt(req.params.id), 'delete', { title: row.title });
+      res.json({ ok: true });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
   app.post('/api/accounts/import', authenticate, async (req, res) => {
     try {
       const { accounts: data, skip_duplicates } = req.body;

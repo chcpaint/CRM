@@ -71,6 +71,32 @@ class ApiClient {
   delete<T = any>(endpoint: string): Promise<T> {
     return this.request<T>(endpoint, { method: 'DELETE' });
   }
+
+  patch<T = any>(endpoint: string, body?: any): Promise<T> {
+    return this.request<T>(endpoint, { method: 'PATCH', body: JSON.stringify(body) });
+  }
+
+  // multipart/form-data upload — let the browser set the boundary header itself.
+  async upload<T = any>(endpoint: string, formData: FormData): Promise<T> {
+    const headers: Record<string, string> = {};
+    if (this.token) headers['Authorization'] = `Bearer ${this.token}`;
+    const response = await fetch(`${API_BASE}${endpoint}`, {
+      method: 'POST',
+      headers,
+      body: formData,
+      credentials: 'include',
+    });
+    if (response.status === 401) {
+      this.token = null;
+      localStorage.removeItem('token');
+      localStorage.removeItem('user');
+      window.location.href = '/login';
+      throw new Error('Session expired');
+    }
+    const data = await response.json();
+    if (!response.ok) throw { status: response.status, ...data };
+    return data;
+  }
 }
 
 export const api = new ApiClient();

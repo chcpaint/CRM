@@ -342,3 +342,20 @@ CREATE TABLE IF NOT EXISTS customer_alert_dismissals (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_customer_alert_dismissals_name_lower
   ON customer_alert_dismissals (LOWER(customer_name));
+
+-- ─── COMPETITIVE MARKET INFO ────────────────────────────────────────
+-- Team-shared library of competitor price lists, promotion flyers, scans, etc.
+-- File bytes live in the DB so they survive Render redeploys (no persistent disk).
+CREATE TABLE IF NOT EXISTS competitive_market_info (
+  id SERIAL PRIMARY KEY,
+  title TEXT NOT NULL,
+  notes TEXT,
+  filename TEXT NOT NULL,
+  mime_type TEXT NOT NULL,
+  file_size INTEGER NOT NULL,
+  file_data BYTEA NOT NULL,
+  uploaded_by_id INTEGER REFERENCES users(id),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_competitive_market_info_created ON competitive_market_info(created_at DESC);

@@ -433,7 +433,8 @@ export default function SalesPage({ user }: Props) {
       if (!byDate[key]) byDate[key] = [];
       byDate[key].push(item);
     });
-    return Object.entries(byDate).sort(([a], [b]) => a.localeCompare(b));
+    // Newest invoices first (sales team wants the most recent purchase at the top)
+    return Object.entries(byDate).sort(([a], [b]) => b.localeCompare(a));
   };
 
   const fmtDate = (d: string) => {

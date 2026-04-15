@@ -197,6 +197,7 @@ export default function SalesPage({ user }: Props) {
   // Filters
   const [filterCustomer, setFilterCustomer] = useState<string>('');
   const [filterSalesperson, setFilterSalesperson] = useState<string>('');
+  const [filterYear, setFilterYear] = useState<string>(String(new Date().getFullYear()));
   const [voiceMatchFeedback, setVoiceMatchFeedback] = useState<string>('');
 
   useEffect(() => { loadSales(); loadShopTargets(); }, []);
@@ -404,6 +405,7 @@ export default function SalesPage({ user }: Props) {
   const filteredSales = sales.filter(s => {
     if (filterCustomer && (s.customer_name || s.shop_name || '') !== filterCustomer) return false;
     if (filterSalesperson && (s.salesperson || '') !== filterSalesperson) return false;
+    if (filterYear !== 'all' && !(s.sale_date || '').startsWith(filterYear)) return false;
     return true;
   });
 
@@ -445,7 +447,8 @@ export default function SalesPage({ user }: Props) {
 
   const fmtMoney = (n: number) => '$' + n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
-  const activeFilters = (filterCustomer ? 1 : 0) + (filterSalesperson ? 1 : 0);
+  const activeFilters = (filterCustomer ? 1 : 0) + (filterSalesperson ? 1 : 0) + (filterYear !== 'all' && filterYear !== String(new Date().getFullYear()) ? 1 : 0);
+  const availableYears = [...new Set(sales.map(s => (s.sale_date || '').slice(0, 4)).filter(Boolean))].sort((a, b) => b.localeCompare(a));
 
   // Compute all unique PCR categories across entire sales dataset (for "not purchased" feature)
   const allCategories = [...new Set(sales.map(s => s.category).filter(Boolean))].sort();
@@ -464,7 +467,7 @@ export default function SalesPage({ user }: Props) {
     <div>
       {/* Date range banner */}
       {sales.length > 0 && (() => {
-        const dates = sales.map(s => s.sale_date).filter(Boolean).sort();
+        const dates = filteredSales.map(s => s.sale_date).filter(Boolean).sort();
         if (dates.length === 0) return null;
         const first = new Date(dates[0] + 'T00:00:00');
         const last = new Date(dates[dates.length - 1] + 'T00:00:00');
@@ -476,7 +479,9 @@ export default function SalesPage({ user }: Props) {
                 {first.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} &ndash; {last.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
               </span>
             </div>
-            <span className="text-xs text-brand-600">{sales.length} records &middot; {allCustomers.length} customers</span>
+            <span className="text-xs text-brand-600">
+              {filterYear === 'all' ? 'All years' : `Year: ${filterYear}`} &middot; {filteredSales.length.toLocaleString()} of {sales.length.toLocaleString()} records &middot; {allCustomers.length} customers
+            </span>
           </div>
         );
       })()}
@@ -516,10 +521,21 @@ export default function SalesPage({ user }: Props) {
               {allSalespersons.map(sp => <option key={sp} value={sp}>{sp}</option>)}
             </select>
           )}
+          {availableYears.length > 1 && (
+            <select
+              value={filterYear}
+              onChange={e => { setFilterYear(e.target.value); setExpandedSale(null); }}
+              className="input-field text-sm py-2"
+              title="Filter by year"
+            >
+              <option value="all">All Years</option>
+              {availableYears.map(y => <option key={y} value={y}>{y}</option>)}
+            </select>
+          )}
           {activeFilters > 0 && (
             <div className="flex items-center justify-between sm:justify-start gap-3">
               <button
-                onClick={() => { setFilterCustomer(''); setFilterSalesperson(''); setExpandedSale(null); }}
+                onClick={() => { setFilterCustomer(''); setFilterSalesperson(''); setFilterYear(String(new Date().getFullYear())); setExpandedSale(null); }}
                 className="text-xs text-brand-600 hover:text-brand-800 underline"
               >
                 Clear filters ({activeFilters})

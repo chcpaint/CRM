@@ -1656,24 +1656,46 @@ async function startServer() {
         return { synced: 0, created: 0, updated: 0 };
       }
 
+      // Normalize shop name into a stable key so minor AccountEdge tweaks
+      // ("Inc"/"Ltd"/punctuation/whitespace) don't create duplicate accounts.
+      const normalizeKey = (s) => (s || '')
+        .toLowerCase()
+        .replace(/\b(inc|ltd|llc|corp|corporation|company|co|limited)\b\.?/g, '')
+        .replace(/[^a-z0-9]+/g, ' ')
+        .trim()
+        .replace(/\s+/g, '-');
+
       let created = 0, updated = 0, skipped = 0;
       for (const shop of pcrShops) {
         try {
-          const existing = await queryOne(
-            'SELECT id, account_category, status, pcr_managed FROM accounts WHERE LOWER(shop_name) = LOWER($1) AND deleted_at IS NULL',
-            [shop.shop_name]
+          const pcrId = normalizeKey(shop.shop_name);
+          // Match by pcr_customer_id first (stable even if name changed), then by name
+          let existing = await queryOne(
+            'SELECT id, account_category, status, pcr_managed FROM accounts WHERE pcr_customer_id = $1 AND deleted_at IS NULL',
+            [pcrId]
           );
+          if (!existing) {
+            existing = await queryOne(
+              'SELECT id, account_category, status, pcr_managed FROM accounts WHERE LOWER(shop_name) = LOWER($1) AND deleted_at IS NULL',
+              [shop.shop_name]
+            );
+          }
           if (existing) {
-            // Update existing: mark as PCR-managed, set to customer/active if not already
-            const updates = ["pcr_managed = true", "pcr_shop_name = $1"];
-            const params = [shop.shop_name];
-            let idx = 2;
+            // Merge PCR metadata into CRM record. Never overwrite CRM user-entered fields —
+            // only fill blanks and update PCR-owned fields (status/category/pcr_* columns).
+            const updates = ["pcr_managed = true", "pcr_shop_name = $1", "pcr_customer_id = $2", "pcr_last_synced_at = NOW()"];
+            const params = [shop.shop_name, pcrId];
+            let idx = 3;
             if (existing.account_category !== 'customer') {
               updates.push("account_category = 'customer'");
             }
-            if (existing.status !== 'active') {
+            // Respect manually set dnc/churned — never auto-flip those back to active
+            if (existing.status !== 'active' && existing.status !== 'dnc' && existing.status !== 'churned') {
               updates.push("status = 'active'");
             }
+            // If the AccountEdge name changed, adopt it — PCR is source of truth for shop_name
+            updates.push(`shop_name = $${idx++}`);
+            params.push(shop.shop_name);
             if (shop.branch) {
               updates.push(`branch = COALESCE(NULLIF(branch,''), $${idx++})`);
               params.push(shop.branch);
@@ -1684,8 +1706,9 @@ async function startServer() {
           } else {
             // Create new active customer from PCR
             await execute(
-              `INSERT INTO accounts (shop_name, branch, account_category, status, pcr_managed, pcr_shop_name) VALUES ($1, $2, 'customer', 'active', true, $1)`,
-              [shop.shop_name, shop.branch || null]
+              `INSERT INTO accounts (shop_name, branch, account_category, status, pcr_managed, pcr_shop_name, pcr_customer_id, pcr_last_synced_at)
+               VALUES ($1, $2, 'customer', 'active', true, $1, $3, NOW())`,
+              [shop.shop_name, shop.branch || null, pcrId]
             );
             created++;
           }
@@ -1863,7 +1886,17 @@ async function startServer() {
           WHERE NOT EXISTS (SELECT 1 FROM cron.job WHERE jobname='refresh-sales-data-nightly')
         `);
       } catch (cronErr) { console.warn('cron schedule skipped:', cronErr.message); }
-      res.json({ success: true, ...result, stats: stats.rows[0] });
+
+      // Also sync customers/shops from PCR so new shops show up immediately
+      let customerSync = null;
+      try {
+        customerSync = await syncPCRCustomers();
+      } catch (custErr) {
+        console.warn('customer sync during refresh-sales skipped:', custErr.message);
+        customerSync = { error: custErr.message };
+      }
+
+      res.json({ success: true, ...result, stats: stats.rows[0], customerSync });
     } catch (e) {
       console.error('refresh-sales-from-pcr error:', e);
       res.status(500).json({ success: false, error: e.message });
@@ -1871,6 +1904,19 @@ async function startServer() {
       client.release();
     }
   });
+
+  // Nightly PCR customer sync — runs ~30 min after the 05:30 UTC sales refresh so
+  // any new shops in pcr_shop_list flow into the CRM's accounts table automatically.
+  cron.schedule('0 6 * * *', async () => {
+    try {
+      console.log('[PCR Cron] Running nightly customer sync...');
+      const result = await syncPCRCustomers();
+      console.log('[PCR Cron] Customer sync result:', JSON.stringify(result));
+    } catch (err) {
+      console.error('[PCR Cron] Customer sync failed:', err.message);
+    }
+  });
+  console.log('  PCR customer sync: scheduled nightly at 06:00 UTC');
 
   // ─── CHECK PCR MATCH: check if a lead has a matching PCR shop ───
   app.get('/api/accounts/:id/pcr-match', authenticate, async (req, res) => {

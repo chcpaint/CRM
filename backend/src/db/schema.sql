@@ -289,6 +289,18 @@ DO $$ BEGIN
   ALTER TABLE accounts ADD COLUMN pcr_shop_name TEXT;
 EXCEPTION WHEN duplicate_column THEN NULL;
 END $$;
+-- Stable PCR customer identifier (normalized shop name or AccountEdge card id).
+-- Populated by syncPCRCustomers() so name tweaks in AccountEdge don't create duplicates.
+DO $$ BEGIN
+  ALTER TABLE accounts ADD COLUMN pcr_customer_id TEXT;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+CREATE INDEX IF NOT EXISTS idx_accounts_pcr_customer_id ON accounts(pcr_customer_id) WHERE pcr_customer_id IS NOT NULL;
+-- Last time PCR sync touched this record (for staleness detection)
+DO $$ BEGIN
+  ALTER TABLE accounts ADD COLUMN pcr_last_synced_at TIMESTAMPTZ;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
 
 CREATE INDEX IF NOT EXISTS idx_accounts_category ON accounts(account_category);
 CREATE INDEX IF NOT EXISTS idx_accounts_branch ON accounts(branch);

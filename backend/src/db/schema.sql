@@ -326,3 +326,19 @@ DROP TRIGGER IF EXISTS audit_log_no_delete ON audit_log;
 CREATE TRIGGER audit_log_no_delete
   BEFORE DELETE ON audit_log
   FOR EACH ROW EXECUTE FUNCTION audit_log_block_modify();
+
+-- ─── CUSTOMER ALERT DISMISSALS ──────────────────────────────────────
+-- Managers/admins can permanently remove a customer from the alerts page
+-- (e.g. shop closed, no longer carries PPG, etc.). Stored separately so the
+-- alerts query can compute lapsed customers fresh and just filter out dismissed ones.
+CREATE TABLE IF NOT EXISTS customer_alert_dismissals (
+  id SERIAL PRIMARY KEY,
+  customer_name TEXT NOT NULL,
+  reason TEXT NOT NULL CHECK (reason IN ('closed', 'no_longer_ppg', 'other')),
+  notes TEXT,
+  account_id INTEGER REFERENCES accounts(id),
+  dismissed_by_id INTEGER REFERENCES users(id),
+  dismissed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_customer_alert_dismissals_name_lower
+  ON customer_alert_dismissals (LOWER(customer_name));

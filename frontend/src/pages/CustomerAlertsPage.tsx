@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
-import { AlertTriangle, Search, ArrowUpDown, ShoppingCart, TrendingDown, Package, DollarSign } from 'lucide-react';
+import { AlertTriangle, Search, ArrowUpDown, ShoppingCart, TrendingDown, Package, DollarSign, X, RotateCcw } from 'lucide-react';
 import { api } from '../services/api';
 import { User } from '../types';
 
@@ -22,7 +22,25 @@ interface LapsedCustomer {
   rep_last_name: string | null;
 }
 
+interface DismissedCustomer {
+  id: number;
+  customer_name: string;
+  reason: 'closed' | 'no_longer_ppg' | 'other';
+  notes: string | null;
+  account_id: number | null;
+  dismissed_at: string;
+  by_first_name: string | null;
+  by_last_name: string | null;
+}
+
 type SortKey = 'days' | 'revenue' | 'orders' | 'name';
+type DismissReason = 'closed' | 'no_longer_ppg' | 'other';
+
+const REASON_LABEL: Record<DismissReason, string> = {
+  closed: 'Closed',
+  no_longer_ppg: 'No longer PPG',
+  other: 'Other',
+};
 
 export default function CustomerAlertsPage({ user }: { user: User }) {
   const [alerts, setAlerts] = useState<LapsedCustomer[]>([]);
@@ -33,6 +51,19 @@ export default function CustomerAlertsPage({ user }: { user: User }) {
   const [sortAsc, setSortAsc] = useState(false);
   const [expandedRow, setExpandedRow] = useState<string | null>(null);
   const [filterRep, setFilterRep] = useState('');
+
+  // Manager/admin dismiss controls
+  const canDismiss = user.role === 'admin' || user.role === 'manager';
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [dismissModal, setDismissModal] = useState<{ open: boolean; targets: LapsedCustomer[] }>({ open: false, targets: [] });
+  const [dismissReason, setDismissReason] = useState<DismissReason>('closed');
+  const [dismissNotes, setDismissNotes] = useState('');
+  const [dismissing, setDismissing] = useState(false);
+
+  // Dismissed list panel
+  const [showDismissedPanel, setShowDismissedPanel] = useState(false);
+  const [dismissed, setDismissed] = useState<DismissedCustomer[]>([]);
+  const [dismissedLoading, setDismissedLoading] = useState(false);
 
   useEffect(() => {
     loadAlerts();
@@ -48,6 +79,18 @@ export default function CustomerAlertsPage({ user }: { user: User }) {
       setError(e.error || 'Failed to load customer alerts');
     } finally {
       setLoading(false);
+    }
+  };
+
+  const loadDismissed = async () => {
+    setDismissedLoading(true);
+    try {
+      const data = await api.get('/customer-alerts/dismissed');
+      setDismissed(data.dismissed || []);
+    } catch (e: any) {
+      setError(e.error || 'Failed to load dismissed list');
+    } finally {
+      setDismissedLoading(false);
     }
   };
 
@@ -107,17 +150,97 @@ export default function CustomerAlertsPage({ user }: { user: User }) {
     return 'bg-yellow-100 text-yellow-800';
   };
 
+  // ─── Selection helpers ───
+  const toggleSelect = (name: string) => {
+    setSelected(prev => {
+      const next = new Set(prev);
+      if (next.has(name)) next.delete(name); else next.add(name);
+      return next;
+    });
+  };
+  const clearSelection = () => setSelected(new Set());
+
+  // ─── Dismiss flow ───
+  const openDismissForSelection = () => {
+    const targets = sorted.filter(a => selected.has(a.customer_name));
+    if (targets.length === 0) return;
+    setDismissReason('closed');
+    setDismissNotes('');
+    setDismissModal({ open: true, targets });
+  };
+
+  const openDismissForOne = (a: LapsedCustomer) => {
+    setDismissReason('closed');
+    setDismissNotes('');
+    setDismissModal({ open: true, targets: [a] });
+  };
+
+  const closeDismissModal = () => setDismissModal({ open: false, targets: [] });
+
+  const submitDismiss = async () => {
+    if (dismissModal.targets.length === 0) return;
+    setDismissing(true);
+    try {
+      for (const t of dismissModal.targets) {
+        await api.post('/customer-alerts/dismiss', {
+          customer_name: t.customer_name,
+          reason: dismissReason,
+          notes: dismissNotes.slice(0, 50),
+          account_id: t.account_id || null,
+        });
+      }
+      // Optimistically drop them from the visible list
+      const dismissedNames = new Set(dismissModal.targets.map(t => t.customer_name));
+      setAlerts(prev => prev.filter(a => !dismissedNames.has(a.customer_name)));
+      clearSelection();
+      closeDismissModal();
+    } catch (e: any) {
+      setError(e.error || 'Failed to dismiss');
+    } finally {
+      setDismissing(false);
+    }
+  };
+
+  const restoreOne = async (id: number) => {
+    try {
+      await api.delete(`/customer-alerts/dismiss/${id}`);
+      setDismissed(prev => prev.filter(d => d.id !== id));
+      // Refresh main list so the customer reappears if they still qualify
+      loadAlerts();
+    } catch (e: any) {
+      setError(e.error || 'Failed to restore');
+    }
+  };
+
+  const openDismissedPanel = async () => {
+    setShowDismissedPanel(true);
+    await loadDismissed();
+  };
+
+  const visibleSelectedCount = sorted.filter(a => selected.has(a.customer_name)).length;
+
   return (
     <div className="space-y-4 sm:space-y-6">
       {/* Header */}
-      <div>
-        <h1 className="text-2xl font-bold text-navy-900 flex items-center gap-2">
-          <AlertTriangle className="w-6 h-6 text-amber-500" />
-          Customer Alerts
-        </h1>
-        <p className="text-sm text-navy-500 mt-1">
-          Customers who haven't ordered in 60+ days. Review what they used to buy and reach out with better pricing or back-in-stock news.
-        </p>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h1 className="text-2xl font-bold text-navy-900 flex items-center gap-2">
+            <AlertTriangle className="w-6 h-6 text-amber-500" />
+            Customer Alerts
+          </h1>
+          <p className="text-sm text-navy-500 mt-1">
+            Customers who haven't ordered in 60+ days. Review what they used to buy and reach out with better pricing or back-in-stock news.
+          </p>
+        </div>
+        {canDismiss && (
+          <button
+            onClick={openDismissedPanel}
+            className="btn-ghost text-xs"
+            title="View customers permanently removed from alerts"
+          >
+            View dismissed list
+          </button>
+        )}
       </div>
 
       {/* Summary cards */}
@@ -178,6 +301,19 @@ export default function CustomerAlertsPage({ user }: { user: User }) {
         )}
       </div>
 
+      {/* Bulk action bar */}
+      {canDismiss && visibleSelectedCount > 0 && (
+        <div className="sticky top-16 z-30 bg-navy-900 text-white rounded-xl px-4 py-2.5 flex items-center justify-between shadow-lg">
+          <div className="text-sm font-medium">{visibleSelectedCount} selected</div>
+          <div className="flex items-center gap-2">
+            <button onClick={clearSelection} className="text-xs text-navy-300 hover:text-white px-3 py-1.5 rounded-lg hover:bg-navy-800">Clear</button>
+            <button onClick={openDismissForSelection} className="text-xs font-semibold bg-brand-500 hover:bg-brand-600 px-3 py-1.5 rounded-lg">
+              Remove from alerts…
+            </button>
+          </div>
+        </div>
+      )}
+
       {loading && <div className="text-navy-400 py-8 text-center">Loading customer alerts...</div>}
       {error && <div className="bg-red-50 border border-red-200 text-red-700 p-3 rounded-lg text-sm">{error}</div>}
 
@@ -193,27 +329,40 @@ export default function CustomerAlertsPage({ user }: { user: User }) {
           <div className="sm:hidden space-y-2">
             {sorted.map(a => {
               const isExpanded = expandedRow === a.customer_name;
+              const isSelected = selected.has(a.customer_name);
               return (
-                <div key={a.customer_name} className="card !p-0 overflow-hidden">
-                  <button
-                    onClick={() => setExpandedRow(isExpanded ? null : a.customer_name)}
-                    className="w-full text-left p-4 hover:bg-navy-50 transition-colors"
-                  >
-                    <div className="flex items-start justify-between gap-2">
-                      <div className="min-w-0">
-                        <div className="font-bold text-navy-900 text-sm truncate">{a.shop_name || a.customer_name}</div>
-                        <div className="text-xs text-navy-400 mt-0.5">
-                          {a.rep_first_name ? `${a.rep_first_name} ${a.rep_last_name}` : 'No rep'} &middot; {a.order_count} orders
+                <div key={a.customer_name} className={`card !p-0 overflow-hidden ${isSelected ? 'ring-2 ring-brand-500' : ''}`}>
+                  <div className="flex items-stretch">
+                    {canDismiss && (
+                      <label className="flex items-center px-3 cursor-pointer" onClick={e => e.stopPropagation()}>
+                        <input
+                          type="checkbox"
+                          checked={isSelected}
+                          onChange={() => toggleSelect(a.customer_name)}
+                          className="w-4 h-4 accent-brand-500"
+                        />
+                      </label>
+                    )}
+                    <button
+                      onClick={() => setExpandedRow(isExpanded ? null : a.customer_name)}
+                      className="flex-1 text-left p-4 hover:bg-navy-50 transition-colors"
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="min-w-0">
+                          <div className="font-bold text-navy-900 text-sm truncate">{a.shop_name || a.customer_name}</div>
+                          <div className="text-xs text-navy-400 mt-0.5">
+                            {a.rep_first_name ? `${a.rep_first_name} ${a.rep_last_name}` : 'No rep'} &middot; {a.order_count} orders
+                          </div>
+                        </div>
+                        <div className="text-right flex-shrink-0">
+                          <span className={`inline-block px-2 py-0.5 rounded-full text-xs font-bold ${severityColor(a.days_since_last)}`}>
+                            {a.days_since_last}d silent
+                          </span>
+                          <div className="text-xs font-bold text-green-700 mt-1">{fmtMoney(a.total_revenue)}</div>
                         </div>
                       </div>
-                      <div className="text-right flex-shrink-0">
-                        <span className={`inline-block px-2 py-0.5 rounded-full text-xs font-bold ${severityColor(a.days_since_last)}`}>
-                          {a.days_since_last}d silent
-                        </span>
-                        <div className="text-xs font-bold text-green-700 mt-1">{fmtMoney(a.total_revenue)}</div>
-                      </div>
-                    </div>
-                  </button>
+                    </button>
+                  </div>
                   {isExpanded && (
                     <div className="border-t border-navy-100 bg-navy-50 p-4 space-y-3">
                       <div className="text-xs text-navy-500">
@@ -240,11 +389,21 @@ export default function CustomerAlertsPage({ user }: { user: User }) {
                           </div>
                         </div>
                       )}
-                      {a.account_id && (
-                        <Link to={`/accounts/${a.account_id}`} className="inline-block text-xs font-medium text-brand-600 hover:underline">
-                          View Account &rarr;
-                        </Link>
-                      )}
+                      <div className="flex items-center gap-3 pt-1 flex-wrap">
+                        {a.account_id && (
+                          <Link to={`/accounts/${a.account_id}`} className="inline-block text-xs font-medium text-brand-600 hover:underline">
+                            View Account &rarr;
+                          </Link>
+                        )}
+                        {canDismiss && (
+                          <button
+                            onClick={() => openDismissForOne(a)}
+                            className="text-xs font-medium text-red-600 hover:underline"
+                          >
+                            Remove from alerts
+                          </button>
+                        )}
+                      </div>
                     </div>
                   )}
                 </div>
@@ -257,6 +416,20 @@ export default function CustomerAlertsPage({ user }: { user: User }) {
             <table className="w-full">
               <thead>
                 <tr className="border-b border-navy-100">
+                  {canDismiss && (
+                    <th className="text-left py-3 px-3 w-8">
+                      <input
+                        type="checkbox"
+                        aria-label="Select all visible"
+                        checked={sorted.length > 0 && sorted.every(a => selected.has(a.customer_name))}
+                        onChange={e => {
+                          if (e.target.checked) setSelected(new Set(sorted.map(a => a.customer_name)));
+                          else clearSelection();
+                        }}
+                        className="w-4 h-4 accent-brand-500"
+                      />
+                    </th>
+                  )}
                   <th className="text-left py-3 px-4 text-xs font-medium text-navy-500 uppercase w-6"></th>
                   <th onClick={() => toggleSort('name')} className="text-left py-3 px-4 text-xs font-medium text-navy-500 uppercase cursor-pointer hover:text-navy-700 select-none">
                     <span className="flex items-center gap-1">Customer <ArrowUpDown className="w-3 h-3" /></span>
@@ -277,13 +450,24 @@ export default function CustomerAlertsPage({ user }: { user: User }) {
               <tbody>
                 {sorted.map(a => {
                   const isExpanded = expandedRow === a.customer_name;
+                  const isSelected = selected.has(a.customer_name);
                   return (
                     <>
                       <tr
                         key={a.customer_name}
                         onClick={() => setExpandedRow(isExpanded ? null : a.customer_name)}
-                        className="border-b border-navy-50 cursor-pointer hover:bg-amber-50/50 transition-colors"
+                        className={`border-b border-navy-50 cursor-pointer transition-colors ${isSelected ? 'bg-brand-50/50 hover:bg-brand-50' : 'hover:bg-amber-50/50'}`}
                       >
+                        {canDismiss && (
+                          <td className="py-3 px-3" onClick={e => e.stopPropagation()}>
+                            <input
+                              type="checkbox"
+                              checked={isSelected}
+                              onChange={() => toggleSelect(a.customer_name)}
+                              className="w-4 h-4 accent-brand-500"
+                            />
+                          </td>
+                        )}
                         <td className="py-3 px-4 text-navy-400">
                           <span className={`inline-block transition-transform text-xs ${isExpanded ? 'rotate-90' : ''}`}>&#9654;</span>
                         </td>
@@ -305,7 +489,7 @@ export default function CustomerAlertsPage({ user }: { user: User }) {
                       </tr>
                       {isExpanded && (
                         <tr key={`${a.customer_name}-detail`}>
-                          <td colSpan={7} className="p-0">
+                          <td colSpan={canDismiss ? 8 : 7} className="p-0">
                             <div className="bg-navy-50 border-y border-navy-100 px-4 pl-10 py-4 space-y-3">
                               <div className="flex flex-wrap gap-x-6 gap-y-1 text-xs text-navy-500">
                                 <span>Normal cadence: <strong className="text-navy-700">every {a.avg_gap_days} days</strong></span>
@@ -336,11 +520,19 @@ export default function CustomerAlertsPage({ user }: { user: User }) {
                                 </div>
                               )}
 
-                              <div className="flex items-center gap-3 pt-1">
+                              <div className="flex items-center gap-3 pt-1 flex-wrap">
                                 {a.account_id && (
                                   <Link to={`/accounts/${a.account_id}`} className="text-xs font-medium text-brand-600 hover:text-brand-700 hover:underline">
                                     View Account &rarr;
                                   </Link>
+                                )}
+                                {canDismiss && (
+                                  <button
+                                    onClick={() => openDismissForOne(a)}
+                                    className="text-xs font-medium text-red-600 hover:text-red-700 hover:underline"
+                                  >
+                                    Remove from alerts
+                                  </button>
                                 )}
                                 <span className="text-xs text-navy-400 italic">
                                   Reach out with better pricing, back-in-stock news, or new product offerings in these categories.
@@ -357,6 +549,112 @@ export default function CustomerAlertsPage({ user }: { user: User }) {
             </table>
           </div>
         </>
+      )}
+
+      {/* ─── Dismiss modal ─── */}
+      {dismissModal.open && (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md p-6 space-y-4 animate-fade-in">
+            <div className="flex items-start justify-between gap-2">
+              <h2 className="text-lg font-bold text-navy-900">
+                Remove from alerts
+              </h2>
+              <button onClick={closeDismissModal} className="text-navy-400 hover:text-navy-600">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <p className="text-sm text-navy-500">
+              {dismissModal.targets.length === 1
+                ? <>Permanently remove <strong>{dismissModal.targets[0].shop_name || dismissModal.targets[0].customer_name}</strong> from the customer alerts page.</>
+                : <>Permanently remove <strong>{dismissModal.targets.length}</strong> customers from the customer alerts page.</>}
+              {' '}A note will be added to each linked account card.
+            </p>
+
+            <div>
+              <label className="block text-xs font-semibold text-navy-700 uppercase mb-1.5">Reason</label>
+              <select
+                value={dismissReason}
+                onChange={e => setDismissReason(e.target.value as DismissReason)}
+                className="input-field w-full"
+              >
+                <option value="closed">Closed</option>
+                <option value="no_longer_ppg">No longer PPG</option>
+                <option value="other">Other</option>
+              </select>
+            </div>
+
+            <div>
+              <label className="block text-xs font-semibold text-navy-700 uppercase mb-1.5">
+                Notes <span className="text-navy-400 normal-case font-normal">(optional, max 50 chars)</span>
+              </label>
+              <input
+                type="text"
+                maxLength={50}
+                value={dismissNotes}
+                onChange={e => setDismissNotes(e.target.value)}
+                placeholder="e.g. Confirmed by owner Jan 2026"
+                className="input-field w-full"
+              />
+              <div className="text-xs text-navy-400 mt-1 text-right">{dismissNotes.length}/50</div>
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-2">
+              <button onClick={closeDismissModal} className="btn-ghost text-sm" disabled={dismissing}>Cancel</button>
+              <button onClick={submitDismiss} disabled={dismissing} className="btn-primary text-sm">
+                {dismissing ? 'Saving…' : `Remove ${dismissModal.targets.length > 1 ? dismissModal.targets.length + ' customers' : ''}`}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ─── Dismissed list panel ─── */}
+      {showDismissedPanel && (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl max-h-[80vh] flex flex-col">
+            <div className="flex items-center justify-between p-5 border-b border-navy-100">
+              <h2 className="text-lg font-bold text-navy-900">Dismissed customers</h2>
+              <button onClick={() => setShowDismissedPanel(false)} className="text-navy-400 hover:text-navy-600">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <div className="overflow-y-auto p-5">
+              {dismissedLoading && <div className="text-navy-400 text-center py-6">Loading…</div>}
+              {!dismissedLoading && dismissed.length === 0 && (
+                <div className="text-center text-navy-500 py-6 text-sm">No dismissed customers yet.</div>
+              )}
+              {!dismissedLoading && dismissed.length > 0 && (
+                <ul className="divide-y divide-navy-100">
+                  {dismissed.map(d => (
+                    <li key={d.id} className="py-3 flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="font-medium text-navy-900 text-sm truncate">{d.customer_name}</div>
+                        <div className="text-xs text-navy-500 mt-0.5">
+                          <span className="font-semibold">{REASON_LABEL[d.reason]}</span>
+                          {d.notes && <span> — {d.notes}</span>}
+                        </div>
+                        <div className="text-[11px] text-navy-400 mt-0.5">
+                          {fmtDate(d.dismissed_at)}
+                          {d.by_first_name && ` · by ${d.by_first_name} ${d.by_last_name || ''}`}
+                          {d.account_id && (
+                            <> · <Link to={`/accounts/${d.account_id}`} className="text-brand-600 hover:underline">view account</Link></>
+                          )}
+                        </div>
+                      </div>
+                      <button
+                        onClick={() => restoreOne(d.id)}
+                        className="flex items-center gap-1 text-xs font-medium text-navy-600 hover:text-brand-600 px-2 py-1 rounded-lg hover:bg-navy-50"
+                        title="Put this customer back on the alerts page"
+                      >
+                        <RotateCcw className="w-3 h-3" /> Restore
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

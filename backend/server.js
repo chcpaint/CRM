@@ -2431,6 +2431,10 @@ async function startServer() {
         LEFT JOIN accounts a ON a.deleted_at IS NULL
           AND (LOWER(a.shop_name) = LOWER(l.customer_name) OR LOWER(a.pcr_shop_name) = LOWER(l.customer_name))
         LEFT JOIN users u ON a.assigned_rep_id = u.id
+        WHERE NOT EXISTS (
+          SELECT 1 FROM customer_alert_dismissals d
+          WHERE LOWER(d.customer_name) = LOWER(l.customer_name)
+        )
         ORDER BY c.total_revenue DESC NULLS LAST
       `);
       res.json({ alerts, total: alerts.length });
@@ -2438,6 +2442,88 @@ async function startServer() {
       console.error('customer-alerts error:', e);
       res.status(500).json({ error: e.message });
     }
+  });
+
+  // ─── DISMISS a customer from the alerts page (admin/manager only) ───
+  // Body: { customer_name, reason: 'closed'|'no_longer_ppg'|'other', notes?, account_id? }
+  // Persists a dismissal row and, when an account is linked, drops a note on the account card.
+  app.post('/api/customer-alerts/dismiss', authenticate, async (req, res) => {
+    try {
+      if (req.user.role !== 'admin' && req.user.role !== 'manager') {
+        return res.status(403).json({ error: 'Admin or manager access required' });
+      }
+      const { customer_name, reason, notes, account_id } = req.body || {};
+      if (!customer_name || typeof customer_name !== 'string') return res.status(400).json({ error: 'customer_name required' });
+      const allowedReasons = ['closed', 'no_longer_ppg', 'other'];
+      if (!allowedReasons.includes(reason)) return res.status(400).json({ error: 'invalid reason' });
+      const cleanNotes = (notes || '').toString().slice(0, 50).trim() || null;
+
+      // Upsert by lowercased customer_name to avoid duplicates with case differences
+      const existing = await queryOne('SELECT id FROM customer_alert_dismissals WHERE LOWER(customer_name) = LOWER($1)', [customer_name]);
+      if (existing) {
+        await execute(
+          'UPDATE customer_alert_dismissals SET reason=$1, notes=$2, account_id=$3, dismissed_by_id=$4, dismissed_at=NOW() WHERE id=$5',
+          [reason, cleanNotes, account_id || null, req.user.userId, existing.id]
+        );
+      } else {
+        await execute(
+          'INSERT INTO customer_alert_dismissals (customer_name, reason, notes, account_id, dismissed_by_id) VALUES ($1,$2,$3,$4,$5)',
+          [customer_name, reason, cleanNotes, account_id || null, req.user.userId]
+        );
+      }
+
+      // If the customer is linked to an account, append a note to that account's card
+      // so the rep sees why it's been removed from alerts.
+      if (account_id) {
+        const reasonLabel = reason === 'closed' ? 'Closed'
+          : reason === 'no_longer_ppg' ? 'No longer PPG'
+          : 'Other';
+        const noteContent = `[Customer Alerts — Dismissed] Reason: ${reasonLabel}${cleanNotes ? ` — ${cleanNotes}` : ''}`;
+        try {
+          await execute(
+            'INSERT INTO notes (account_id, created_by_id, content) VALUES ($1,$2,$3)',
+            [account_id, req.user.userId, noteContent]
+          );
+        } catch (e) { console.warn('dismiss: failed to attach note:', e.message); }
+      }
+
+      await logAudit(req, 'customer_alert', 0, 'dismiss', { customer_name, reason, notes: cleanNotes, account_id });
+      res.json({ ok: true });
+    } catch (e) {
+      console.error('alerts/dismiss error:', e);
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // ─── LIST currently-dismissed customers (admin/manager only) ───
+  app.get('/api/customer-alerts/dismissed', authenticate, async (req, res) => {
+    try {
+      if (req.user.role !== 'admin' && req.user.role !== 'manager') {
+        return res.status(403).json({ error: 'Admin or manager access required' });
+      }
+      const rows = await queryAll(
+        `SELECT d.id, d.customer_name, d.reason, d.notes, d.account_id, d.dismissed_at,
+                u.first_name AS by_first_name, u.last_name AS by_last_name
+         FROM customer_alert_dismissals d
+         LEFT JOIN users u ON d.dismissed_by_id = u.id
+         ORDER BY d.dismissed_at DESC`
+      );
+      res.json({ dismissed: rows });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
+  // ─── RESTORE (un-dismiss) a customer back onto the alerts page ───
+  app.delete('/api/customer-alerts/dismiss/:id', authenticate, async (req, res) => {
+    try {
+      if (req.user.role !== 'admin' && req.user.role !== 'manager') {
+        return res.status(403).json({ error: 'Admin or manager access required' });
+      }
+      const row = await queryOne('SELECT * FROM customer_alert_dismissals WHERE id=$1', [req.params.id]);
+      if (!row) return res.status(404).json({ error: 'Not found' });
+      await execute('DELETE FROM customer_alert_dismissals WHERE id=$1', [req.params.id]);
+      await logAudit(req, 'customer_alert', 0, 'restore', { customer_name: row.customer_name });
+      res.json({ ok: true });
+    } catch (e) { res.status(500).json({ error: e.message }); }
   });
 
   // ============================================================================

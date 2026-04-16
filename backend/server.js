@@ -857,10 +857,35 @@ async function startServer() {
           : 'SELECT s.customer_name as shop_name, s.salesperson, SUM(s.sale_amount) as total_revenue, COUNT(s.id) as sale_count FROM sales_data s WHERE s.customer_name IS NOT NULL GROUP BY s.customer_name, s.salesperson ORDER BY total_revenue DESC LIMIT 15',
         isRep ? [uid] : []);
 
+      // Combined feed: activities + notes, merged & sorted by date
       const recentActivities = await queryAll(
         isRep
-          ? 'SELECT act.*, a.shop_name, u.first_name, u.last_name FROM activities act JOIN accounts a ON act.account_id=a.id JOIN users u ON act.rep_id=u.id WHERE act.rep_id=$1 ORDER BY act.created_at DESC LIMIT 10'
-          : 'SELECT act.*, a.shop_name, u.first_name, u.last_name FROM activities act JOIN accounts a ON act.account_id=a.id JOIN users u ON act.rep_id=u.id ORDER BY act.created_at DESC LIMIT 10',
+          ? `(SELECT act.id, act.account_id, 'activity' AS entry_type, act.activity_type, act.description, act.created_at,
+                    a.shop_name, u.first_name, u.last_name
+               FROM activities act
+               JOIN accounts a ON act.account_id=a.id
+               JOIN users u ON act.rep_id=u.id
+              WHERE act.rep_id=$1)
+             UNION ALL
+             (SELECT n.id, n.account_id, 'note' AS entry_type, NULL AS activity_type, n.content AS description, n.created_at,
+                    a.shop_name, u.first_name, u.last_name
+               FROM notes n
+               JOIN accounts a ON n.account_id=a.id
+               JOIN users u ON n.created_by_id=u.id
+              WHERE n.created_by_id=$1)
+             ORDER BY created_at DESC LIMIT 15`
+          : `(SELECT act.id, act.account_id, 'activity' AS entry_type, act.activity_type, act.description, act.created_at,
+                    a.shop_name, u.first_name, u.last_name
+               FROM activities act
+               JOIN accounts a ON act.account_id=a.id
+               JOIN users u ON act.rep_id=u.id)
+             UNION ALL
+             (SELECT n.id, n.account_id, 'note' AS entry_type, NULL AS activity_type, n.content AS description, n.created_at,
+                    a.shop_name, u.first_name, u.last_name
+               FROM notes n
+               JOIN accounts a ON n.account_id=a.id
+               JOIN users u ON n.created_by_id=u.id)
+             ORDER BY created_at DESC LIMIT 15`,
         isRep ? [uid] : []);
 
       const dormantCount = await queryOne(

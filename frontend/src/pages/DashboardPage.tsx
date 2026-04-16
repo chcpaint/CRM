@@ -178,25 +178,42 @@ export default function DashboardPage({ user }: Props) {
           <h2 className="font-bold text-navy-900 mb-4 text-sm sm:text-base">Recent Activity</h2>
           {metrics.recentActivities.length > 0 ? (
             <div className="space-y-2 sm:space-y-3">
-              {metrics.recentActivities.map((a) => (
-                <Link
-                  key={a.id}
-                  to={`/accounts/${a.account_id}`}
-                  className="flex items-start gap-2 sm:gap-3 py-2 border-b border-navy-50 last:border-0 hover:bg-navy-50 -mx-2 px-2 rounded transition-colors"
-                >
-                  <div className="w-7 h-7 sm:w-8 sm:h-8 rounded-full bg-navy-100 flex items-center justify-center text-xs sm:text-sm flex-shrink-0">
-                    {a.activity_type === 'call' ? '📞' : a.activity_type === 'email' ? '📧' : a.activity_type === 'visit' ? '🚗' : '📋'}
-                  </div>
-                  <div className="min-w-0">
-                    <div className="text-xs sm:text-sm text-navy-900">
-                      <span className="font-medium">{a.first_name}</span> logged a {a.activity_type} with <span className="font-medium">{a.shop_name}</span>
+              {metrics.recentActivities.map((a: any) => {
+                const isNote = a.entry_type === 'note';
+                const icon = isNote ? '📝'
+                  : a.activity_type === 'call' ? '📞'
+                  : a.activity_type === 'email' ? '📧'
+                  : a.activity_type === 'visit' || a.activity_type === 'drop_in' ? '🚗'
+                  : a.activity_type === 'meeting' ? '🤝'
+                  : a.activity_type === 'text' ? '💬'
+                  : '📋';
+                const label = isNote ? 'note' : (a.activity_type || 'activity').replace(/_/g, ' ');
+                const snippet = a.description
+                  ? a.description.length > 80 ? a.description.slice(0, 80) + '…' : a.description
+                  : null;
+                return (
+                  <Link
+                    key={`${a.entry_type}-${a.id}`}
+                    to={`/accounts/${a.account_id}`}
+                    className="flex items-start gap-2 sm:gap-3 py-2 border-b border-navy-50 last:border-0 hover:bg-navy-50 -mx-2 px-2 rounded transition-colors"
+                  >
+                    <div className="w-7 h-7 sm:w-8 sm:h-8 rounded-full bg-navy-100 flex items-center justify-center text-xs sm:text-sm flex-shrink-0">
+                      {icon}
                     </div>
-                    <div className="text-[10px] sm:text-xs text-navy-400 mt-0.5">
-                      {new Date(a.created_at).toLocaleDateString()}
+                    <div className="min-w-0 flex-1">
+                      <div className="text-xs sm:text-sm text-navy-900">
+                        <span className="font-medium">{a.first_name}</span> added a {label} on <span className="font-medium">{a.shop_name}</span>
+                      </div>
+                      {snippet && (
+                        <div className="text-[10px] sm:text-xs text-navy-500 mt-0.5 truncate">{snippet}</div>
+                      )}
+                      <div className="text-[10px] sm:text-xs text-navy-400 mt-0.5">
+                        {new Date(a.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' })}
+                      </div>
                     </div>
-                  </div>
-                </Link>
-              ))}
+                  </Link>
+                );
+              })}
             </div>
           ) : (
             <p className="text-navy-400 text-sm py-8 text-center">No recent activity. Start logging calls and visits!</p>

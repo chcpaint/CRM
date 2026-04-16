@@ -124,7 +124,7 @@ export interface DashboardMetrics {
   statusCounts: { status: string; count: number }[];
   monthlyRevenue: { month: string; total: number; count: number }[];
   topAccounts: { shop_name: string; salesperson?: string; city?: string; total_revenue: number; sale_count: number }[];
-  recentActivities: Activity[];
+  recentActivities: (Activity & { entry_type?: 'activity' | 'note' })[];
   dormantCount: number;
   totalAccounts: number;
 }

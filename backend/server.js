@@ -853,25 +853,26 @@ async function startServer() {
         isRep ? [uid] : []);
 
       // Match sales by rep_id OR by salesperson name (belt-and-suspenders in case linkage is pending)
+      // COUNT(DISTINCT memo) gives actual invoice count, not line-item count
       const monthlyRevenue = await queryAll(
         isRep
-          ? `SELECT month, SUM(sale_amount) as total, COUNT(*) as count FROM sales_data
+          ? `SELECT month, SUM(sale_amount) as total, COUNT(DISTINCT memo) as count FROM sales_data
              WHERE rep_id = $1
                 OR LOWER(TRIM(salesperson)) = (SELECT LOWER(TRIM(first_name || ' ' || last_name)) FROM users WHERE id = $1)
              GROUP BY month ORDER BY month DESC LIMIT 12`
-          : 'SELECT month, SUM(sale_amount) as total, COUNT(*) as count FROM sales_data GROUP BY month ORDER BY month DESC LIMIT 12',
+          : 'SELECT month, SUM(sale_amount) as total, COUNT(DISTINCT memo) as count FROM sales_data GROUP BY month ORDER BY month DESC LIMIT 12',
         isRep ? [uid] : []);
 
       // Top accounts by revenue — pulled from sales report data (customer_name), not just matched accounts
       const topAccounts = await queryAll(
         isRep
-          ? `SELECT s.customer_name as shop_name, s.salesperson, SUM(s.sale_amount) as total_revenue, COUNT(s.id) as sale_count
+          ? `SELECT s.customer_name as shop_name, s.salesperson, SUM(s.sale_amount) as total_revenue, COUNT(DISTINCT s.memo) as sale_count
              FROM sales_data s
              WHERE (s.rep_id = $1
                 OR LOWER(TRIM(s.salesperson)) = (SELECT LOWER(TRIM(first_name || ' ' || last_name)) FROM users WHERE id = $1))
                AND s.customer_name IS NOT NULL
              GROUP BY s.customer_name, s.salesperson ORDER BY total_revenue DESC LIMIT 15`
-          : 'SELECT s.customer_name as shop_name, s.salesperson, SUM(s.sale_amount) as total_revenue, COUNT(s.id) as sale_count FROM sales_data s WHERE s.customer_name IS NOT NULL GROUP BY s.customer_name, s.salesperson ORDER BY total_revenue DESC LIMIT 15',
+          : 'SELECT s.customer_name as shop_name, s.salesperson, SUM(s.sale_amount) as total_revenue, COUNT(DISTINCT s.memo) as sale_count FROM sales_data s WHERE s.customer_name IS NOT NULL GROUP BY s.customer_name, s.salesperson ORDER BY total_revenue DESC LIMIT 15',
         isRep ? [uid] : []);
 
       // Combined feed: activities + notes, merged & sorted by date
@@ -966,7 +967,7 @@ async function startServer() {
           const salesResults = await queryAll(
             `SELECT customer_name, account_id,
               SUM(sale_amount) as total_revenue,
-              COUNT(*) as sale_count,
+              COUNT(DISTINCT memo) as sale_count,
               MAX(sale_date) as last_sale_date
             FROM sales_data
             WHERE customer_name ILIKE $1

@@ -782,6 +782,12 @@ async function startServer() {
       const { records } = req.body;
       if (!Array.isArray(records)) return res.status(400).json({ error: 'records array required' });
       const allAccounts = await queryAll('SELECT id, shop_name FROM accounts WHERE deleted_at IS NULL');
+      const allUsers = await queryAll('SELECT id, first_name, last_name FROM users WHERE is_active = true');
+      // Build salesperson → user lookup (lowercase full name → id)
+      const spLookup = {};
+      for (const u of allUsers) {
+        spLookup[(u.first_name + ' ' + u.last_name).toLowerCase().trim()] = u.id;
+      }
       let imported = 0; const unmatched = [];
       for (const r of records) {
         const name = r.customer_name || r['Customer Name'] || r['Name'] || '';
@@ -801,9 +807,11 @@ async function startServer() {
           const s = similarity(name, a.shop_name);
           if (s > best && s >= 0.80) { best = s; matchId = a.id; }
         }
+        // Match salesperson to user id (prefer actual match, fallback to uploader)
+        const repId = spLookup[salesperson.toLowerCase().trim()] || req.user.userId;
         const month = date.substring(0, 7);
         await execute('INSERT INTO sales_data (account_id,rep_id,sale_amount,sale_date,month,memo,customer_name,imported_from_accountedge,item_name,quantity,cogs,profit,category,product_line,salesperson) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)',
-          [matchId, req.user.userId, amt, date, month, memo, name, true, itemName, quantity, cogs, profit, category, productLine, salesperson]);
+          [matchId, repId, amt, date, month, memo, name, true, itemName, quantity, cogs, profit, category, productLine, salesperson]);
         if (!matchId) unmatched.push({ customer_name: name, amount: amt, date });
         imported++;
       }
@@ -844,16 +852,25 @@ async function startServer() {
           : 'SELECT status, COUNT(*) as count FROM accounts WHERE deleted_at IS NULL GROUP BY status',
         isRep ? [uid] : []);
 
+      // Match sales by rep_id OR by salesperson name (belt-and-suspenders in case linkage is pending)
       const monthlyRevenue = await queryAll(
         isRep
-          ? 'SELECT month, SUM(sale_amount) as total, COUNT(*) as count FROM sales_data WHERE rep_id = $1 GROUP BY month ORDER BY month DESC LIMIT 12'
+          ? `SELECT month, SUM(sale_amount) as total, COUNT(*) as count FROM sales_data
+             WHERE rep_id = $1
+                OR LOWER(TRIM(salesperson)) = (SELECT LOWER(TRIM(first_name || ' ' || last_name)) FROM users WHERE id = $1)
+             GROUP BY month ORDER BY month DESC LIMIT 12`
           : 'SELECT month, SUM(sale_amount) as total, COUNT(*) as count FROM sales_data GROUP BY month ORDER BY month DESC LIMIT 12',
         isRep ? [uid] : []);
 
       // Top accounts by revenue — pulled from sales report data (customer_name), not just matched accounts
       const topAccounts = await queryAll(
         isRep
-          ? 'SELECT s.customer_name as shop_name, s.salesperson, SUM(s.sale_amount) as total_revenue, COUNT(s.id) as sale_count FROM sales_data s WHERE s.rep_id = $1 AND s.customer_name IS NOT NULL GROUP BY s.customer_name, s.salesperson ORDER BY total_revenue DESC LIMIT 15'
+          ? `SELECT s.customer_name as shop_name, s.salesperson, SUM(s.sale_amount) as total_revenue, COUNT(s.id) as sale_count
+             FROM sales_data s
+             WHERE (s.rep_id = $1
+                OR LOWER(TRIM(s.salesperson)) = (SELECT LOWER(TRIM(first_name || ' ' || last_name)) FROM users WHERE id = $1))
+               AND s.customer_name IS NOT NULL
+             GROUP BY s.customer_name, s.salesperson ORDER BY total_revenue DESC LIMIT 15`
           : 'SELECT s.customer_name as shop_name, s.salesperson, SUM(s.sale_amount) as total_revenue, COUNT(s.id) as sale_count FROM sales_data s WHERE s.customer_name IS NOT NULL GROUP BY s.customer_name, s.salesperson ORDER BY total_revenue DESC LIMIT 15',
         isRep ? [uid] : []);
 
@@ -2122,6 +2139,39 @@ async function startServer() {
           FROM _sales_scratch;
           GET DIAGNOSTICS v_inserted = ROW_COUNT;
           DROP TABLE _sales_scratch;
+
+          -- ── Link rep_id by exact match on "First Last" ──
+          UPDATE sales_data s SET rep_id = u.id
+            FROM users u
+           WHERE s.rep_id IS NULL
+             AND LOWER(TRIM(s.salesperson)) = LOWER(TRIM(u.first_name || ' ' || u.last_name));
+
+          -- ── Link rep_id for common name variants ──
+          UPDATE sales_data SET rep_id = sub.uid
+            FROM (
+              SELECT unnest(ARRAY['chiappetta frank','frank c','frankie g','frankie g.']) AS alias,
+                     (SELECT id FROM users WHERE LOWER(first_name)='frank' AND LOWER(last_name)='chiappetta' LIMIT 1) AS uid
+              UNION ALL
+              SELECT unnest(ARRAY['halliday, ben']),
+                     (SELECT id FROM users WHERE LOWER(first_name)='ben' AND LOWER(last_name)='halliday' LIMIT 1)
+              UNION ALL
+              SELECT unnest(ARRAY['manny','manni']),
+                     (SELECT id FROM users WHERE LOWER(first_name)='manny' AND LOWER(last_name)='pacheco' LIMIT 1)
+              UNION ALL
+              SELECT 'tony',
+                     (SELECT id FROM users WHERE LOWER(first_name)='tony' AND LOWER(last_name)='galati' LIMIT 1)
+            ) sub
+           WHERE sales_data.rep_id IS NULL
+             AND LOWER(TRIM(sales_data.salesperson)) = sub.alias
+             AND sub.uid IS NOT NULL;
+
+          -- ── Link account_id by exact match on customer_name ──
+          UPDATE sales_data s SET account_id = a.id
+            FROM accounts a
+           WHERE s.account_id IS NULL
+             AND a.deleted_at IS NULL
+             AND LOWER(TRIM(s.customer_name)) = LOWER(TRIM(a.shop_name));
+
           RETURN jsonb_build_object('inserted', v_inserted);
         END $func$;
       `);

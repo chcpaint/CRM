@@ -852,27 +852,103 @@ async function startServer() {
           : 'SELECT status, COUNT(*) as count FROM accounts WHERE deleted_at IS NULL GROUP BY status',
         isRep ? [uid] : []);
 
-      // Match sales by rep_id OR by salesperson name (belt-and-suspenders in case linkage is pending)
+      // Revenue uses branch_daily_revenue (post-discount invoice totals from intranet)
+      // For reps: proportional share of branch revenue based on their line-item contribution
       // COUNT(DISTINCT memo) gives actual invoice count, not line-item count
       const monthlyRevenue = await queryAll(
         isRep
-          ? `SELECT month, SUM(sale_amount) as total, COUNT(DISTINCT memo) as count FROM sales_data
-             WHERE rep_id = $1
-                OR LOWER(TRIM(salesperson)) = (SELECT LOWER(TRIM(first_name || ' ' || last_name)) FROM users WHERE id = $1)
-             GROUP BY month ORDER BY month DESC LIMIT 12`
-          : 'SELECT month, SUM(sale_amount) as total, COUNT(DISTINCT memo) as count FROM sales_data GROUP BY month ORDER BY month DESC LIMIT 12',
+          ? `WITH rep_items AS (
+               SELECT month, branch, SUM(sale_amount) as rep_amount, COUNT(DISTINCT memo) as inv_count
+               FROM sales_data
+               WHERE rep_id = $1
+                  OR LOWER(TRIM(salesperson)) = (SELECT LOWER(TRIM(first_name || ' ' || last_name)) FROM users WHERE id = $1)
+               GROUP BY month, branch
+             ),
+             branch_items AS (
+               SELECT month, branch, SUM(sale_amount) as branch_amount
+               FROM sales_data
+               WHERE branch IS NOT NULL
+               GROUP BY month, branch
+             ),
+             branch_rev AS (
+               SELECT month, branch_name as branch, SUM(revenue) as actual_revenue
+               FROM branch_daily_revenue
+               GROUP BY month, branch_name
+             )
+             SELECT ri.month,
+                    COALESCE(SUM(
+                      CASE WHEN bi.branch_amount > 0
+                        THEN ri.rep_amount / bi.branch_amount * br.actual_revenue
+                        ELSE ri.rep_amount
+                      END
+                    ), 0) as total,
+                    SUM(ri.inv_count) as count
+             FROM rep_items ri
+             LEFT JOIN branch_items bi ON bi.month = ri.month AND bi.branch = ri.branch
+             LEFT JOIN branch_rev br ON br.month = ri.month AND br.branch = ri.branch
+             GROUP BY ri.month ORDER BY ri.month DESC LIMIT 12`
+          : `SELECT b.month, SUM(b.revenue) as total,
+                    COALESCE((SELECT COUNT(DISTINCT memo) FROM sales_data s WHERE s.month = b.month), 0) as count
+             FROM branch_daily_revenue b
+             GROUP BY b.month ORDER BY b.month DESC LIMIT 12`,
         isRep ? [uid] : []);
 
-      // Top accounts by revenue — pulled from sales report data (customer_name), not just matched accounts
+      // Top accounts by revenue — uses proportional scaling against branch_daily_revenue for accuracy
       const topAccounts = await queryAll(
         isRep
-          ? `SELECT s.customer_name as shop_name, s.salesperson, SUM(s.sale_amount) as total_revenue, COUNT(DISTINCT s.memo) as sale_count
-             FROM sales_data s
-             WHERE (s.rep_id = $1
-                OR LOWER(TRIM(s.salesperson)) = (SELECT LOWER(TRIM(first_name || ' ' || last_name)) FROM users WHERE id = $1))
-               AND s.customer_name IS NOT NULL
-             GROUP BY s.customer_name, s.salesperson ORDER BY total_revenue DESC LIMIT 15`
-          : 'SELECT s.customer_name as shop_name, s.salesperson, SUM(s.sale_amount) as total_revenue, COUNT(DISTINCT s.memo) as sale_count FROM sales_data s WHERE s.customer_name IS NOT NULL GROUP BY s.customer_name, s.salesperson ORDER BY total_revenue DESC LIMIT 15',
+          ? `WITH acct_items AS (
+               SELECT s.customer_name, s.salesperson, s.branch, s.month,
+                      SUM(s.sale_amount) as acct_amount, COUNT(DISTINCT s.memo) as inv_count
+               FROM sales_data s
+               WHERE (s.rep_id = $1
+                  OR LOWER(TRIM(s.salesperson)) = (SELECT LOWER(TRIM(first_name || ' ' || last_name)) FROM users WHERE id = $1))
+                 AND s.customer_name IS NOT NULL
+               GROUP BY s.customer_name, s.salesperson, s.branch, s.month
+             ),
+             branch_items AS (
+               SELECT month, branch, SUM(sale_amount) as branch_amount
+               FROM sales_data WHERE branch IS NOT NULL
+               GROUP BY month, branch
+             ),
+             branch_rev AS (
+               SELECT month, branch_name as branch, SUM(revenue) as actual_revenue
+               FROM branch_daily_revenue GROUP BY month, branch_name
+             )
+             SELECT ai.customer_name as shop_name, ai.salesperson,
+                    SUM(CASE WHEN bi.branch_amount > 0
+                      THEN ai.acct_amount / bi.branch_amount * br.actual_revenue
+                      ELSE ai.acct_amount END) as total_revenue,
+                    SUM(ai.inv_count) as sale_count
+             FROM acct_items ai
+             LEFT JOIN branch_items bi ON bi.month = ai.month AND bi.branch = ai.branch
+             LEFT JOIN branch_rev br ON br.month = ai.month AND br.branch = ai.branch
+             GROUP BY ai.customer_name, ai.salesperson
+             ORDER BY total_revenue DESC LIMIT 15`
+          : `WITH acct_items AS (
+               SELECT s.customer_name, s.salesperson, s.branch, s.month,
+                      SUM(s.sale_amount) as acct_amount, COUNT(DISTINCT s.memo) as inv_count
+               FROM sales_data s WHERE s.customer_name IS NOT NULL
+               GROUP BY s.customer_name, s.salesperson, s.branch, s.month
+             ),
+             branch_items AS (
+               SELECT month, branch, SUM(sale_amount) as branch_amount
+               FROM sales_data WHERE branch IS NOT NULL
+               GROUP BY month, branch
+             ),
+             branch_rev AS (
+               SELECT month, branch_name as branch, SUM(revenue) as actual_revenue
+               FROM branch_daily_revenue GROUP BY month, branch_name
+             )
+             SELECT ai.customer_name as shop_name, ai.salesperson,
+                    SUM(CASE WHEN bi.branch_amount > 0
+                      THEN ai.acct_amount / bi.branch_amount * br.actual_revenue
+                      ELSE ai.acct_amount END) as total_revenue,
+                    SUM(ai.inv_count) as sale_count
+             FROM acct_items ai
+             LEFT JOIN branch_items bi ON bi.month = ai.month AND bi.branch = ai.branch
+             LEFT JOIN branch_rev br ON br.month = ai.month AND br.branch = ai.branch
+             GROUP BY ai.customer_name, ai.salesperson
+             ORDER BY total_revenue DESC LIMIT 15`,
         isRep ? [uid] : []);
 
       // Combined feed: activities + notes, merged & sorted by date
@@ -965,15 +1041,32 @@ async function startServer() {
         const salesTerms = q.replace(/show|me|find|all|the|get|list|search|for|who|what|which|where/gi, '').trim();
         if (salesTerms) {
           const salesResults = await queryAll(
-            `SELECT customer_name, account_id,
-              SUM(sale_amount) as total_revenue,
-              COUNT(DISTINCT memo) as sale_count,
-              MAX(sale_date) as last_sale_date
-            FROM sales_data
-            WHERE customer_name ILIKE $1
-            GROUP BY customer_name, account_id
-            ORDER BY total_revenue DESC
-            LIMIT 20`,
+            `WITH cust_items AS (
+               SELECT s.customer_name, s.account_id, s.branch, s.month,
+                      SUM(s.sale_amount) as cust_amount, COUNT(DISTINCT s.memo) as inv_count,
+                      MAX(s.sale_date) as last_sale
+               FROM sales_data s WHERE s.customer_name ILIKE $1
+               GROUP BY s.customer_name, s.account_id, s.branch, s.month
+             ),
+             branch_items AS (
+               SELECT month, branch, SUM(sale_amount) as branch_amount
+               FROM sales_data WHERE branch IS NOT NULL GROUP BY month, branch
+             ),
+             branch_rev AS (
+               SELECT month, branch_name as branch, SUM(revenue) as actual_revenue
+               FROM branch_daily_revenue GROUP BY month, branch_name
+             )
+             SELECT ci.customer_name, ci.account_id,
+                    SUM(CASE WHEN bi.branch_amount > 0
+                      THEN ci.cust_amount / bi.branch_amount * br.actual_revenue
+                      ELSE ci.cust_amount END) as total_revenue,
+                    SUM(ci.inv_count) as sale_count,
+                    MAX(ci.last_sale) as last_sale_date
+             FROM cust_items ci
+             LEFT JOIN branch_items bi ON bi.month = ci.month AND bi.branch = ci.branch
+             LEFT JOIN branch_rev br ON br.month = ci.month AND br.branch = ci.branch
+             GROUP BY ci.customer_name, ci.account_id
+             ORDER BY total_revenue DESC LIMIT 20`,
             [`%${salesTerms}%`]
           );
           if (salesResults.length > 0) {

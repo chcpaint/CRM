@@ -840,6 +840,75 @@ async function startServer() {
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
 
+  // ─── SALES REVENUE SUMMARY (correct post-discount figures) ───
+  app.get('/api/sales/revenue-summary', authenticate, async (req, res) => {
+    try {
+      const year = req.query.year || String(new Date().getFullYear());
+      const currentMonth = new Date().toISOString().slice(0, 7); // e.g. "2026-04"
+
+      // Per-salesperson revenue using proportional scaling against branch_daily_revenue
+      const rows = await queryAll(`
+        WITH sp_items AS (
+          SELECT s.salesperson, s.branch, s.month,
+                 SUM(s.sale_amount) as sp_amount
+          FROM sales_data s
+          WHERE s.salesperson IS NOT NULL AND s.salesperson != ''
+            AND s.sale_date >= $1 || '-01-01' AND s.sale_date <= $1 || '-12-31'
+          GROUP BY s.salesperson, s.branch, s.month
+        ),
+        branch_items AS (
+          SELECT month, branch, SUM(sale_amount) as branch_amount
+          FROM sales_data
+          WHERE branch IS NOT NULL
+            AND sale_date >= $1 || '-01-01' AND sale_date <= $1 || '-12-31'
+          GROUP BY month, branch
+        ),
+        branch_rev AS (
+          SELECT month, branch_name as branch, SUM(revenue) as actual_revenue
+          FROM branch_daily_revenue
+          WHERE month >= $1 || '-01' AND month <= $1 || '-12'
+          GROUP BY month, branch_name
+        )
+        SELECT sp.salesperson,
+               SUM(CASE WHEN bi.branch_amount > 0
+                 THEN sp.sp_amount / bi.branch_amount * br.actual_revenue
+                 ELSE sp.sp_amount END) as ytd_revenue,
+               SUM(CASE WHEN sp.month = $2 AND bi.branch_amount > 0
+                 THEN sp.sp_amount / bi.branch_amount * br.actual_revenue
+                 WHEN sp.month = $2
+                 THEN sp.sp_amount
+                 ELSE 0 END) as month_revenue
+        FROM sp_items sp
+        LEFT JOIN branch_items bi ON bi.month = sp.month AND bi.branch = sp.branch
+        LEFT JOIN branch_rev br ON br.month = sp.month AND br.branch = sp.branch
+        GROUP BY sp.salesperson
+        ORDER BY ytd_revenue DESC
+      `, [year, currentMonth]);
+
+      // Company totals from branch_daily_revenue
+      const companyTotals = await queryOne(`
+        SELECT
+          COALESCE(SUM(CASE WHEN month >= $1 || '-01' AND month <= $1 || '-12' THEN revenue ELSE 0 END), 0) as ytd_total,
+          COALESCE(SUM(CASE WHEN month = $2 THEN revenue ELSE 0 END), 0) as month_total
+        FROM branch_daily_revenue
+      `, [year, currentMonth]);
+
+      res.json({
+        year,
+        currentMonth,
+        salespersons: rows.map(r => ({
+          salesperson: r.salesperson,
+          ytd_revenue: parseFloat(r.ytd_revenue) || 0,
+          month_revenue: parseFloat(r.month_revenue) || 0
+        })),
+        company: {
+          ytd_total: parseFloat(companyTotals?.ytd_total) || 0,
+          month_total: parseFloat(companyTotals?.month_total) || 0
+        }
+      });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
   // ─── DASHBOARD ───
   app.get('/api/sales/dashboard/metrics', authenticate, async (req, res) => {
     try {

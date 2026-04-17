@@ -17,8 +17,14 @@ export default function SalesPage({ user }: Props) {
   const [filterSalesperson, setFilterSalesperson] = useState<string>('');
   const [filterYear, setFilterYear] = useState<string>(String(new Date().getFullYear()));
   const [voiceMatchFeedback, setVoiceMatchFeedback] = useState<string>('');
+  const [revSummary, setRevSummary] = useState<{
+    year: string;
+    currentMonth: string;
+    salespersons: { salesperson: string; ytd_revenue: number; month_revenue: number }[];
+    company: { ytd_total: number; month_total: number };
+  } | null>(null);
 
-  useEffect(() => { loadSales(); loadShopTargets(); }, []);
+  useEffect(() => { loadSales(); loadShopTargets(); loadRevenueSummary(); }, []);
 
   // Handle ?customer= URL param (from voice navigation) — fuzzy match
   useEffect(() => {
@@ -118,6 +124,18 @@ export default function SalesPage({ user }: Props) {
       console.error('shop targets load failed', err);
     }
   };
+
+  const loadRevenueSummary = async (yr?: string) => {
+    try {
+      const data = await api.get('/sales/revenue-summary', { year: yr || filterYear });
+      setRevSummary(data);
+    } catch (err) {
+      console.error('revenue summary load failed', err);
+    }
+  };
+
+  // Reload revenue summary when year filter changes
+  useEffect(() => { loadRevenueSummary(filterYear); }, [filterYear]);
 
   // Build YTD breakdown for a customer's sales items
   const buildBreakdown = (items: any[]) => {
@@ -291,6 +309,77 @@ export default function SalesPage({ user }: Props) {
             </div>
           )}
         </div>
+      )}
+
+      {/* Revenue Summary Bar */}
+      {revSummary && !loading && (
+        (() => {
+          const monthName = (() => {
+            try {
+              const [y, m] = revSummary.currentMonth.split('-');
+              return new Date(Number(y), Number(m) - 1).toLocaleString('en-US', { month: 'long' });
+            } catch { return revSummary.currentMonth; }
+          })();
+          const yr = revSummary.year;
+
+          // If a salesperson is selected, show their numbers; otherwise show company totals
+          const spData = filterSalesperson
+            ? revSummary.salespersons.find(s => s.salesperson === filterSalesperson)
+            : null;
+          const showMonth = spData ? spData.month_revenue : revSummary.company.month_total;
+          const showYtd = spData ? spData.ytd_revenue : revSummary.company.ytd_total;
+          const label = filterSalesperson || 'Company Total';
+
+          // If viewing "all years" or a past year, only show YTD
+          const isCurrentYear = yr === String(new Date().getFullYear());
+
+          return (
+            <div className="bg-gradient-to-r from-green-50 to-emerald-50 border border-green-200 rounded-xl px-4 sm:px-5 py-3 mb-4 sm:mb-5">
+              <div className="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-6">
+                <div className="text-sm font-semibold text-green-900">{label}</div>
+                <div className="flex flex-wrap items-center gap-4 sm:gap-6">
+                  {isCurrentYear && filterYear !== 'all' && (
+                    <div className="flex items-baseline gap-1.5">
+                      <span className="text-xs text-green-600 font-medium uppercase tracking-wide">{monthName}</span>
+                      <span className="text-lg font-bold text-green-800">
+                        ${showMonth.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}
+                      </span>
+                    </div>
+                  )}
+                  <div className="flex items-baseline gap-1.5">
+                    <span className="text-xs text-green-600 font-medium uppercase tracking-wide">
+                      {filterYear === 'all' ? 'All Time' : `YTD ${yr}`}
+                    </span>
+                    <span className={`font-bold text-green-800 ${isCurrentYear && filterYear !== 'all' ? 'text-base' : 'text-lg'}`}>
+                      ${showYtd.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}
+                    </span>
+                  </div>
+                </div>
+              </div>
+              {/* If no salesperson selected, show per-rep breakdown */}
+              {!filterSalesperson && revSummary.salespersons.length > 0 && (
+                <div className="mt-2 pt-2 border-t border-green-200/60 grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-x-4 gap-y-1">
+                  {revSummary.salespersons
+                    .filter(s => s.ytd_revenue > 0)
+                    .map(s => (
+                    <div key={s.salesperson} className="flex items-baseline justify-between gap-2 text-xs">
+                      <span className="text-green-700 truncate">{s.salesperson}</span>
+                      <span className="font-semibold text-green-900 tabular-nums flex-shrink-0">
+                        {isCurrentYear && filterYear !== 'all'
+                          ? '$' + s.month_revenue.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 })
+                          : '$' + s.ytd_revenue.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 })
+                        }
+                        <span className="text-green-500 font-normal ml-1">
+                          ({isCurrentYear && filterYear !== 'all' ? monthName.slice(0, 3) : 'YTD'})
+                        </span>
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          );
+        })()
       )}
 
       {/* Voice match feedback */}

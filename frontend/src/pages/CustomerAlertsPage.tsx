@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
-import { AlertTriangle, Search, ArrowUpDown, ShoppingCart, TrendingDown, Package, DollarSign, X, RotateCcw } from 'lucide-react';
+import { AlertTriangle, Search, ArrowUpDown, ShoppingCart, TrendingDown, Package, DollarSign, X, RotateCcw, Users } from 'lucide-react';
 import { api } from '../services/api';
 import { User } from '../types';
 
@@ -51,6 +51,7 @@ export default function CustomerAlertsPage({ user }: { user: User }) {
   const [sortAsc, setSortAsc] = useState(false);
   const [expandedRow, setExpandedRow] = useState<string | null>(null);
   const [filterRep, setFilterRep] = useState('');
+  const [groupByRep, setGroupByRep] = useState(true);
 
   // Anyone can dismiss/restore — every action is audited and reversible.
   // `user` retained for future role-aware tweaks (e.g. show "by you" labels).
@@ -139,6 +140,28 @@ export default function CustomerAlertsPage({ user }: { user: User }) {
     if (sortBy === key) setSortAsc(!sortAsc);
     else { setSortBy(key); setSortAsc(false); }
   };
+
+  // Group by rep
+  const groupedByRep = (() => {
+    const map = new Map<string, { repName: string; alerts: LapsedCustomer[]; totalRev: number; avgDays: number }>();
+    for (const a of sorted) {
+      const repName = a.rep_first_name ? `${a.rep_first_name} ${a.rep_last_name}` : 'Unassigned';
+      if (!map.has(repName)) map.set(repName, { repName, alerts: [], totalRev: 0, avgDays: 0 });
+      const g = map.get(repName)!;
+      g.alerts.push(a);
+      g.totalRev += Number(a.total_revenue) || 0;
+    }
+    // Compute avg days per group
+    for (const g of map.values()) {
+      g.avgDays = g.alerts.length > 0 ? Math.round(g.alerts.reduce((s, a) => s + Number(a.days_since_last), 0) / g.alerts.length) : 0;
+    }
+    // Sort groups: Unassigned last, then by total revenue descending
+    return [...map.values()].sort((a, b) => {
+      if (a.repName === 'Unassigned') return 1;
+      if (b.repName === 'Unassigned') return -1;
+      return b.totalRev - a.totalRev;
+    });
+  })();
 
   // Summary stats
   const totalRevAtRisk = filtered.reduce((s, a) => s + (Number(a.total_revenue) || 0), 0);
@@ -301,6 +324,18 @@ export default function CustomerAlertsPage({ user }: { user: User }) {
             {allReps.map(r => <option key={r} value={r}>{r}</option>)}
           </select>
         )}
+        <button
+          onClick={() => setGroupByRep(!groupByRep)}
+          className={`flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-medium transition-colors ${
+            groupByRep
+              ? 'bg-brand-500 text-white hover:bg-brand-600'
+              : 'bg-navy-100 text-navy-600 hover:bg-navy-200'
+          }`}
+          title={groupByRep ? 'Switch to flat list' : 'Group by salesperson'}
+        >
+          <Users className="w-3.5 h-3.5" />
+          Group by Rep
+        </button>
       </div>
 
       {/* Bulk action bar */}
@@ -325,7 +360,113 @@ export default function CustomerAlertsPage({ user }: { user: User }) {
         </div>
       )}
 
-      {!loading && !error && sorted.length > 0 && (
+      {!loading && !error && sorted.length > 0 && groupByRep && !filterRep && (
+        <div className="space-y-6">
+          {groupedByRep.map(group => (
+            <div key={group.repName} className="space-y-2">
+              {/* Rep section header */}
+              <div className="flex items-center justify-between bg-navy-50 rounded-xl px-4 py-3 sticky top-16 z-20 border border-navy-100">
+                <div className="flex items-center gap-3">
+                  <div className="w-8 h-8 rounded-full bg-brand-500 text-white flex items-center justify-center text-sm font-bold">
+                    {group.repName === 'Unassigned' ? '?' : group.repName.split(' ').map(n => n[0]).join('')}
+                  </div>
+                  <div>
+                    <div className="font-bold text-navy-900 text-sm">{group.repName}</div>
+                    <div className="text-xs text-navy-500">
+                      {group.alerts.length} lapsed {group.alerts.length === 1 ? 'customer' : 'customers'} &middot; {fmtMoney(group.totalRev)} at risk &middot; avg {group.avgDays}d silent
+                    </div>
+                  </div>
+                </div>
+                <div className="flex items-center gap-4 text-xs">
+                  <div className="hidden sm:flex items-center gap-1">
+                    <span className="inline-block w-2 h-2 rounded-full bg-red-500"></span>
+                    <span className="text-navy-500">{group.alerts.filter(a => a.days_since_last >= 180).length} critical</span>
+                  </div>
+                  <div className="hidden sm:flex items-center gap-1">
+                    <span className="inline-block w-2 h-2 rounded-full bg-amber-500"></span>
+                    <span className="text-navy-500">{group.alerts.filter(a => a.days_since_last >= 90 && a.days_since_last < 180).length} warning</span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Rep's customers */}
+              <div className="space-y-1.5 pl-2 sm:pl-4">
+                {group.alerts.map(a => {
+                  const isExpanded = expandedRow === a.customer_name;
+                  const isSelected = selected.has(a.customer_name);
+                  return (
+                    <div key={a.customer_name} className={`card !p-0 overflow-hidden ${isSelected ? 'ring-2 ring-brand-500' : ''}`}>
+                      <div className="flex items-stretch">
+                        {canDismiss && (
+                          <label className="flex items-center px-3 cursor-pointer" onClick={e => e.stopPropagation()}>
+                            <input type="checkbox" checked={isSelected} onChange={() => toggleSelect(a.customer_name)} className="w-4 h-4 accent-brand-500" />
+                          </label>
+                        )}
+                        <button
+                          onClick={() => setExpandedRow(isExpanded ? null : a.customer_name)}
+                          className="flex-1 text-left p-3 hover:bg-navy-50 transition-colors"
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <div className="min-w-0 flex-1">
+                              <div className="flex items-center gap-2">
+                                <span className={`text-xs ${isExpanded ? 'rotate-90' : ''} transition-transform text-navy-400`}>&#9654;</span>
+                                <span className="font-medium text-navy-900 text-sm truncate">{a.shop_name || a.customer_name}</span>
+                              </div>
+                              <div className="text-[11px] text-navy-400 mt-0.5 ml-5">
+                                {a.order_count} orders &middot; Last: {fmtDate(a.last_order_date)} &middot; Cadence: every {a.avg_gap_days}d
+                              </div>
+                            </div>
+                            <div className="flex items-center gap-3 flex-shrink-0">
+                              <span className={`inline-block px-2 py-0.5 rounded-full text-xs font-bold ${severityColor(a.days_since_last)}`}>
+                                {a.days_since_last}d
+                              </span>
+                              <span className="text-sm font-bold text-green-600 w-20 text-right">{fmtMoney(a.total_revenue)}</span>
+                            </div>
+                          </div>
+                        </button>
+                      </div>
+                      {isExpanded && (
+                        <div className="border-t border-navy-100 bg-navy-50 p-4 space-y-3">
+                          {a.categories && a.categories.length > 0 && (
+                            <div>
+                              <div className="text-xs font-bold text-red-600 uppercase mb-1">What They Bought — Categories</div>
+                              <div className="flex flex-wrap gap-1.5">
+                                {a.categories.map(c => (
+                                  <span key={c} className="px-2 py-0.5 rounded-full bg-white border border-navy-200 text-xs text-navy-700 font-medium">{c}</span>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                          {a.product_lines && a.product_lines.length > 0 && (
+                            <div>
+                              <div className="text-xs font-bold text-brand-600 uppercase mb-1">Product Lines</div>
+                              <div className="flex flex-wrap gap-1.5">
+                                {a.product_lines.map(p => (
+                                  <span key={p} className="px-2.5 py-0.5 rounded-full bg-brand-50 border border-brand-200 text-xs text-brand-700 font-medium">{p}</span>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                          <div className="flex items-center gap-3 pt-1 flex-wrap">
+                            {a.account_id && (
+                              <Link to={`/accounts/${a.account_id}`} className="text-xs font-medium text-brand-600 hover:underline">View Account &rarr;</Link>
+                            )}
+                            {canDismiss && (
+                              <button onClick={() => openDismissForOne(a)} className="text-xs font-medium text-red-600 hover:underline">Remove from alerts</button>
+                            )}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {!loading && !error && sorted.length > 0 && (!groupByRep || !!filterRep) && (
         <>
           {/* Mobile card view */}
           <div className="sm:hidden space-y-2">

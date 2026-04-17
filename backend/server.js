@@ -2614,14 +2614,16 @@ async function startServer() {
           a.id AS account_id,
           a.shop_name,
           a.status AS account_status,
-          a.assigned_rep_id AS rep_id,
-          u.first_name AS rep_first_name,
-          u.last_name AS rep_last_name
+          COALESCE(a.assigned_rep_id, sp_user.id) AS rep_id,
+          COALESCE(u.first_name, sp_user.first_name) AS rep_first_name,
+          COALESCE(u.last_name, sp_user.last_name) AS rep_last_name
         FROM lapsed l
         JOIN cat_agg c ON c.customer_name = l.customer_name
         LEFT JOIN accounts a ON a.deleted_at IS NULL
           AND (LOWER(a.shop_name) = LOWER(l.customer_name) OR LOWER(a.pcr_shop_name) = LOWER(l.customer_name))
         LEFT JOIN users u ON a.assigned_rep_id = u.id
+        LEFT JOIN users sp_user ON u.id IS NULL
+          AND LOWER(TRIM(c.salesperson)) = LOWER(TRIM(sp_user.first_name || ' ' || sp_user.last_name))
         WHERE NOT EXISTS (
           SELECT 1 FROM customer_alert_dismissals d
           WHERE LOWER(d.customer_name) = LOWER(l.customer_name)

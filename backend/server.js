@@ -754,9 +754,19 @@ async function startServer() {
   app.get('/api/sales', authenticate, async (req, res) => {
     try {
       const { month, rep_id, account_id, page = '1', limit = '50' } = req.query;
+      const isRep = req.user.role === 'rep';
+      const uid = req.user.userId;
       let where = []; let params = []; let idx = 1;
+
+      // Reps can only see their own sales
+      if (isRep) {
+        where.push(`(s.rep_id = $${idx} OR LOWER(TRIM(s.salesperson)) = (SELECT LOWER(TRIM(first_name || ' ' || last_name)) FROM users WHERE id = $${idx}))`);
+        params.push(uid);
+        idx++;
+      }
+
       if (month) { where.push(`s.month=$${idx++}`); params.push(month); }
-      if (rep_id) { where.push(`s.rep_id=$${idx++}`); params.push(rep_id); }
+      if (rep_id && !isRep) { where.push(`s.rep_id=$${idx++}`); params.push(rep_id); }
       if (account_id) { where.push(`s.account_id=$${idx++}`); params.push(account_id); }
       const w = where.length ? 'WHERE ' + where.join(' AND ') : '';
       const lim = parseInt(limit);
@@ -845,57 +855,111 @@ async function startServer() {
     try {
       const year = req.query.year || String(new Date().getFullYear());
       const currentMonth = new Date().toISOString().slice(0, 7); // e.g. "2026-04"
+      const isRep = req.user.role === 'rep';
+      const uid = req.user.userId;
 
-      // Per-salesperson revenue using proportional scaling against branch_daily_revenue
-      const rows = await queryAll(`
-        WITH sp_items AS (
-          SELECT s.salesperson, s.branch, s.month,
-                 SUM(s.sale_amount) as sp_amount
-          FROM sales_data s
-          WHERE s.salesperson IS NOT NULL AND s.salesperson != ''
-            AND s.sale_date >= $1 || '-01-01' AND s.sale_date <= $1 || '-12-31'
-          GROUP BY s.salesperson, s.branch, s.month
-        ),
-        branch_items AS (
-          SELECT month, branch, SUM(sale_amount) as branch_amount
-          FROM sales_data
-          WHERE branch IS NOT NULL
-            AND sale_date >= $1 || '-01-01' AND sale_date <= $1 || '-12-31'
-          GROUP BY month, branch
-        ),
-        branch_rev AS (
-          SELECT month, branch_name as branch, SUM(revenue) as actual_revenue
+      let rows;
+      if (isRep) {
+        // Rep only sees their own revenue
+        rows = await queryAll(`
+          WITH rep_items AS (
+            SELECT s.salesperson, s.branch, s.month,
+                   SUM(s.sale_amount) as sp_amount
+            FROM sales_data s
+            WHERE s.salesperson IS NOT NULL AND s.salesperson != ''
+              AND s.sale_date >= $1 || '-01-01' AND s.sale_date <= $1 || '-12-31'
+              AND (s.rep_id = $3 OR LOWER(TRIM(s.salesperson)) = (SELECT LOWER(TRIM(first_name || ' ' || last_name)) FROM users WHERE id = $3))
+            GROUP BY s.salesperson, s.branch, s.month
+          ),
+          branch_items AS (
+            SELECT month, branch, SUM(sale_amount) as branch_amount
+            FROM sales_data
+            WHERE branch IS NOT NULL
+              AND sale_date >= $1 || '-01-01' AND sale_date <= $1 || '-12-31'
+            GROUP BY month, branch
+          ),
+          branch_rev AS (
+            SELECT month, branch_name as branch, SUM(revenue) as actual_revenue
+            FROM branch_daily_revenue
+            WHERE month >= $1 || '-01' AND month <= $1 || '-12'
+            GROUP BY month, branch_name
+          )
+          SELECT ri.salesperson,
+                 SUM(CASE WHEN bi.branch_amount > 0
+                   THEN ri.sp_amount / bi.branch_amount * br.actual_revenue
+                   ELSE ri.sp_amount END) as ytd_revenue,
+                 SUM(CASE WHEN ri.month = $2 AND bi.branch_amount > 0
+                   THEN ri.sp_amount / bi.branch_amount * br.actual_revenue
+                   WHEN ri.month = $2
+                   THEN ri.sp_amount
+                   ELSE 0 END) as month_revenue
+          FROM rep_items ri
+          LEFT JOIN branch_items bi ON bi.month = ri.month AND bi.branch = ri.branch
+          LEFT JOIN branch_rev br ON br.month = ri.month AND br.branch = ri.branch
+          GROUP BY ri.salesperson
+          ORDER BY ytd_revenue DESC
+        `, [year, currentMonth, uid]);
+      } else {
+        // Admin/manager sees all salespersons
+        rows = await queryAll(`
+          WITH sp_items AS (
+            SELECT s.salesperson, s.branch, s.month,
+                   SUM(s.sale_amount) as sp_amount
+            FROM sales_data s
+            WHERE s.salesperson IS NOT NULL AND s.salesperson != ''
+              AND s.sale_date >= $1 || '-01-01' AND s.sale_date <= $1 || '-12-31'
+            GROUP BY s.salesperson, s.branch, s.month
+          ),
+          branch_items AS (
+            SELECT month, branch, SUM(sale_amount) as branch_amount
+            FROM sales_data
+            WHERE branch IS NOT NULL
+              AND sale_date >= $1 || '-01-01' AND sale_date <= $1 || '-12-31'
+            GROUP BY month, branch
+          ),
+          branch_rev AS (
+            SELECT month, branch_name as branch, SUM(revenue) as actual_revenue
+            FROM branch_daily_revenue
+            WHERE month >= $1 || '-01' AND month <= $1 || '-12'
+            GROUP BY month, branch_name
+          )
+          SELECT sp.salesperson,
+                 SUM(CASE WHEN bi.branch_amount > 0
+                   THEN sp.sp_amount / bi.branch_amount * br.actual_revenue
+                   ELSE sp.sp_amount END) as ytd_revenue,
+                 SUM(CASE WHEN sp.month = $2 AND bi.branch_amount > 0
+                   THEN sp.sp_amount / bi.branch_amount * br.actual_revenue
+                   WHEN sp.month = $2
+                   THEN sp.sp_amount
+                   ELSE 0 END) as month_revenue
+          FROM sp_items sp
+          LEFT JOIN branch_items bi ON bi.month = sp.month AND bi.branch = sp.branch
+          LEFT JOIN branch_rev br ON br.month = sp.month AND br.branch = sp.branch
+          GROUP BY sp.salesperson
+          ORDER BY ytd_revenue DESC
+        `, [year, currentMonth]);
+      }
+
+      // Company totals from branch_daily_revenue (admins see full total, reps see their share)
+      let companyTotals;
+      if (isRep) {
+        // For reps, "company" totals = their own totals (sum of the rows above)
+        const ytd = rows.reduce((s, r) => s + (parseFloat(r.ytd_revenue) || 0), 0);
+        const mo = rows.reduce((s, r) => s + (parseFloat(r.month_revenue) || 0), 0);
+        companyTotals = { ytd_total: ytd, month_total: mo };
+      } else {
+        companyTotals = await queryOne(`
+          SELECT
+            COALESCE(SUM(CASE WHEN month >= $1 || '-01' AND month <= $1 || '-12' THEN revenue ELSE 0 END), 0) as ytd_total,
+            COALESCE(SUM(CASE WHEN month = $2 THEN revenue ELSE 0 END), 0) as month_total
           FROM branch_daily_revenue
-          WHERE month >= $1 || '-01' AND month <= $1 || '-12'
-          GROUP BY month, branch_name
-        )
-        SELECT sp.salesperson,
-               SUM(CASE WHEN bi.branch_amount > 0
-                 THEN sp.sp_amount / bi.branch_amount * br.actual_revenue
-                 ELSE sp.sp_amount END) as ytd_revenue,
-               SUM(CASE WHEN sp.month = $2 AND bi.branch_amount > 0
-                 THEN sp.sp_amount / bi.branch_amount * br.actual_revenue
-                 WHEN sp.month = $2
-                 THEN sp.sp_amount
-                 ELSE 0 END) as month_revenue
-        FROM sp_items sp
-        LEFT JOIN branch_items bi ON bi.month = sp.month AND bi.branch = sp.branch
-        LEFT JOIN branch_rev br ON br.month = sp.month AND br.branch = sp.branch
-        GROUP BY sp.salesperson
-        ORDER BY ytd_revenue DESC
-      `, [year, currentMonth]);
-
-      // Company totals from branch_daily_revenue
-      const companyTotals = await queryOne(`
-        SELECT
-          COALESCE(SUM(CASE WHEN month >= $1 || '-01' AND month <= $1 || '-12' THEN revenue ELSE 0 END), 0) as ytd_total,
-          COALESCE(SUM(CASE WHEN month = $2 THEN revenue ELSE 0 END), 0) as month_total
-        FROM branch_daily_revenue
-      `, [year, currentMonth]);
+        `, [year, currentMonth]);
+      }
 
       res.json({
         year,
         currentMonth,
+        isRep,
         salespersons: rows.map(r => ({
           salesperson: r.salesperson,
           ytd_revenue: parseFloat(r.ytd_revenue) || 0,

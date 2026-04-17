@@ -279,7 +279,7 @@ export default function SalesPage({ user }: Props) {
             <option value="">All Customers</option>
             {allCustomers.map(c => <option key={c} value={c}>{c}</option>)}
           </select>
-          {allSalespersons.length > 0 && (
+          {allSalespersons.length > 0 && user.role !== 'rep' && (
             <select
               value={filterSalesperson}
               onChange={e => { setFilterSalesperson(e.target.value); setExpandedSale(null); }}
@@ -326,13 +326,18 @@ export default function SalesPage({ user }: Props) {
         })();
         const yr = revSummary.year;
 
-        // If a salesperson is selected, show their numbers; otherwise show company totals
-        const spData = filterSalesperson
-          ? revSummary.salespersons.find(s => s.salesperson === filterSalesperson)
+        // If a salesperson is selected or user is a rep, show individual numbers; otherwise company totals
+        const isRepUser = user.role === 'rep';
+        const spData = (filterSalesperson || isRepUser)
+          ? revSummary.salespersons.find(s =>
+              filterSalesperson ? s.salesperson === filterSalesperson : true
+            ) || revSummary.salespersons[0]
           : null;
         const showMonth = spData ? spData.month_revenue : revSummary.company.month_total;
         const showYtd = spData ? spData.ytd_revenue : revSummary.company.ytd_total;
-        const label = filterSalesperson || 'All Salespersons';
+        const label = isRepUser
+          ? (spData?.salesperson || 'My Sales')
+          : (filterSalesperson || 'All Salespersons');
 
         const isCurrentYear = yr === String(new Date().getFullYear());
         const fmtRev = (n: number) => '$' + Math.round(n).toLocaleString('en-US');
@@ -358,8 +363,8 @@ export default function SalesPage({ user }: Props) {
                 </div>
               </div>
             </div>
-            {/* If no salesperson selected, show per-rep breakdown */}
-            {!filterSalesperson && revSummary.salespersons.length > 0 && (
+            {/* If no salesperson selected and user is admin/manager, show per-rep breakdown */}
+            {!filterSalesperson && !isRepUser && revSummary.salespersons.length > 0 && (
               <div className="mt-2 pt-2 border-t border-green-200 grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-x-4 gap-y-1.5">
                 {revSummary.salespersons
                   .filter(s => (isCurrentYear && filterYear !== 'all') ? s.month_revenue > 0 : s.ytd_revenue > 0)

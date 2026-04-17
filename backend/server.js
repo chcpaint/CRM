@@ -2623,6 +2623,7 @@ async function startServer() {
           AND (LOWER(a.shop_name) = LOWER(l.customer_name) OR LOWER(a.pcr_shop_name) = LOWER(l.customer_name))
         LEFT JOIN users u ON a.assigned_rep_id = u.id
         LEFT JOIN users sp_user ON u.id IS NULL
+          AND sp_user.is_active = true
           AND LOWER(TRIM(c.salesperson)) = LOWER(TRIM(sp_user.first_name || ' ' || sp_user.last_name))
         WHERE NOT EXISTS (
           SELECT 1 FROM customer_alert_dismissals d

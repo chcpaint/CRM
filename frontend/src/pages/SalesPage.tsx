@@ -23,8 +23,9 @@ export default function SalesPage({ user }: Props) {
     salespersons: { salesperson: string; ytd_revenue: number; month_revenue: number }[];
     company: { ytd_total: number; month_total: number };
   } | null>(null);
+  const [revError, setRevError] = useState(false);
 
-  useEffect(() => { loadSales(); loadShopTargets(); loadRevenueSummary(); }, []);
+  useEffect(() => { loadSales(); loadShopTargets(); }, []);
 
   // Handle ?customer= URL param (from voice navigation) — fuzzy match
   useEffect(() => {
@@ -127,14 +128,18 @@ export default function SalesPage({ user }: Props) {
 
   const loadRevenueSummary = async (yr?: string) => {
     try {
+      setRevError(false);
       const data = await api.get('/sales/revenue-summary', { year: yr || filterYear });
-      setRevSummary(data);
+      if (data && data.company) {
+        setRevSummary(data);
+      }
     } catch (err) {
       console.error('revenue summary load failed', err);
+      setRevError(true);
     }
   };
 
-  // Reload revenue summary when year filter changes
+  // Load revenue summary on mount and when year filter changes
   useEffect(() => { loadRevenueSummary(filterYear); }, [filterYear]);
 
   // Build YTD breakdown for a customer's sales items
@@ -312,75 +317,71 @@ export default function SalesPage({ user }: Props) {
       )}
 
       {/* Revenue Summary Bar */}
-      {revSummary && !loading && (
-        (() => {
-          const monthName = (() => {
-            try {
-              const [y, m] = revSummary.currentMonth.split('-');
-              return new Date(Number(y), Number(m) - 1).toLocaleString('en-US', { month: 'long' });
-            } catch { return revSummary.currentMonth; }
-          })();
-          const yr = revSummary.year;
+      {revSummary && (() => {
+        const monthName = (() => {
+          try {
+            const [y, m] = revSummary.currentMonth.split('-');
+            return new Date(Number(y), Number(m) - 1).toLocaleString('en-US', { month: 'long' });
+          } catch { return revSummary.currentMonth; }
+        })();
+        const yr = revSummary.year;
 
-          // If a salesperson is selected, show their numbers; otherwise show company totals
-          const spData = filterSalesperson
-            ? revSummary.salespersons.find(s => s.salesperson === filterSalesperson)
-            : null;
-          const showMonth = spData ? spData.month_revenue : revSummary.company.month_total;
-          const showYtd = spData ? spData.ytd_revenue : revSummary.company.ytd_total;
-          const label = filterSalesperson || 'Company Total';
+        // If a salesperson is selected, show their numbers; otherwise show company totals
+        const spData = filterSalesperson
+          ? revSummary.salespersons.find(s => s.salesperson === filterSalesperson)
+          : null;
+        const showMonth = spData ? spData.month_revenue : revSummary.company.month_total;
+        const showYtd = spData ? spData.ytd_revenue : revSummary.company.ytd_total;
+        const label = filterSalesperson || 'All Salespersons';
 
-          // If viewing "all years" or a past year, only show YTD
-          const isCurrentYear = yr === String(new Date().getFullYear());
+        const isCurrentYear = yr === String(new Date().getFullYear());
+        const fmtRev = (n: number) => '$' + Math.round(n).toLocaleString('en-US');
 
-          return (
-            <div className="bg-gradient-to-r from-green-50 to-emerald-50 border border-green-200 rounded-xl px-4 sm:px-5 py-3 mb-4 sm:mb-5">
-              <div className="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-6">
-                <div className="text-sm font-semibold text-green-900">{label}</div>
-                <div className="flex flex-wrap items-center gap-4 sm:gap-6">
-                  {isCurrentYear && filterYear !== 'all' && (
-                    <div className="flex items-baseline gap-1.5">
-                      <span className="text-xs text-green-600 font-medium uppercase tracking-wide">{monthName}</span>
-                      <span className="text-lg font-bold text-green-800">
-                        ${showMonth.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}
-                      </span>
-                    </div>
-                  )}
+        return (
+          <div className="bg-green-50 border border-green-300 rounded-xl px-4 sm:px-5 py-3 mb-4 sm:mb-5 shadow-sm">
+            <div className="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-6">
+              <div className="text-sm font-bold text-green-900 min-w-0 truncate">{label}</div>
+              <div className="flex flex-wrap items-center gap-4 sm:gap-6">
+                {isCurrentYear && filterYear !== 'all' && (
                   <div className="flex items-baseline gap-1.5">
-                    <span className="text-xs text-green-600 font-medium uppercase tracking-wide">
-                      {filterYear === 'all' ? 'All Time' : `YTD ${yr}`}
-                    </span>
-                    <span className={`font-bold text-green-800 ${isCurrentYear && filterYear !== 'all' ? 'text-base' : 'text-lg'}`}>
-                      ${showYtd.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}
-                    </span>
+                    <span className="text-lg sm:text-xl font-bold text-green-800">{fmtRev(showMonth)}</span>
+                    <span className="text-xs text-green-600 font-semibold">({monthName})</span>
                   </div>
+                )}
+                <div className="flex items-baseline gap-1.5">
+                  <span className={`font-bold text-green-800 ${isCurrentYear && filterYear !== 'all' ? 'text-base' : 'text-lg sm:text-xl'}`}>
+                    {fmtRev(showYtd)}
+                  </span>
+                  <span className="text-xs text-green-600 font-semibold">
+                    ({filterYear === 'all' ? 'All Time' : `YTD ${yr}`})
+                  </span>
                 </div>
               </div>
-              {/* If no salesperson selected, show per-rep breakdown */}
-              {!filterSalesperson && revSummary.salespersons.length > 0 && (
-                <div className="mt-2 pt-2 border-t border-green-200/60 grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-x-4 gap-y-1">
-                  {revSummary.salespersons
-                    .filter(s => s.ytd_revenue > 0)
-                    .map(s => (
-                    <div key={s.salesperson} className="flex items-baseline justify-between gap-2 text-xs">
-                      <span className="text-green-700 truncate">{s.salesperson}</span>
-                      <span className="font-semibold text-green-900 tabular-nums flex-shrink-0">
-                        {isCurrentYear && filterYear !== 'all'
-                          ? '$' + s.month_revenue.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 })
-                          : '$' + s.ytd_revenue.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 })
-                        }
-                        <span className="text-green-500 font-normal ml-1">
-                          ({isCurrentYear && filterYear !== 'all' ? monthName.slice(0, 3) : 'YTD'})
-                        </span>
-                      </span>
-                    </div>
-                  ))}
-                </div>
-              )}
             </div>
-          );
-        })()
-      )}
+            {/* If no salesperson selected, show per-rep breakdown */}
+            {!filterSalesperson && revSummary.salespersons.length > 0 && (
+              <div className="mt-2 pt-2 border-t border-green-200 grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-x-4 gap-y-1.5">
+                {revSummary.salespersons
+                  .filter(s => (isCurrentYear && filterYear !== 'all') ? s.month_revenue > 0 : s.ytd_revenue > 0)
+                  .map(s => (
+                  <div key={s.salesperson} className="flex items-baseline justify-between gap-2 text-xs">
+                    <span className="text-green-800 truncate font-medium">{s.salesperson}</span>
+                    <span className="font-bold text-green-900 tabular-nums flex-shrink-0">
+                      {isCurrentYear && filterYear !== 'all'
+                        ? fmtRev(s.month_revenue)
+                        : fmtRev(s.ytd_revenue)
+                      }
+                      <span className="text-green-500 font-normal ml-1">
+                        ({isCurrentYear && filterYear !== 'all' ? monthName.slice(0, 3) : 'YTD'})
+                      </span>
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        );
+      })()}
 
       {/* Voice match feedback */}
       {voiceMatchFeedback && (

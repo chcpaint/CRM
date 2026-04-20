@@ -1635,6 +1635,53 @@ async function startServer() {
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
 
+  // ─── PATCH FOLLOW-UP (reschedule / update notes) ───
+  app.patch('/api/accounts/:id/follow-up', authenticate, async (req, res) => {
+    try {
+      const accountId = req.params.id;
+      const { follow_up_date, follow_up_notes } = req.body;
+      if (!follow_up_date) return res.status(400).json({ error: 'follow_up_date required' });
+
+      // Reps can only update their own accounts; admins/managers can update any
+      if (req.user.role === 'rep') {
+        const acct = await queryOne('SELECT assigned_rep_id FROM accounts WHERE id=$1 AND deleted_at IS NULL', [accountId]);
+        if (!acct) return res.status(404).json({ error: 'Account not found' });
+        if (acct.assigned_rep_id !== req.user.userId) {
+          return res.status(403).json({ error: 'You can only update follow-ups on your own accounts' });
+        }
+      }
+
+      // Update the follow-up date on the account
+      await execute('UPDATE accounts SET follow_up_date = $1, updated_at = NOW() WHERE id = $2', [follow_up_date, accountId]);
+
+      // Log the reschedule as a note
+      const noteContent = `[Follow-up rescheduled to ${follow_up_date}] ${follow_up_notes || ''}`.trim();
+      await execute('INSERT INTO notes (account_id, created_by_id, content) VALUES ($1, $2, $3)', [accountId, req.user.userId, noteContent]);
+
+      const account = await queryOne('SELECT id, shop_name, follow_up_date FROM accounts WHERE id=$1', [accountId]);
+      res.json({ account });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
+  // ─── DELETE FOLLOW-UP (clear a follow-up) ───
+  app.delete('/api/accounts/:id/follow-up', authenticate, async (req, res) => {
+    try {
+      const accountId = req.params.id;
+      // Reps can only clear their own; admins/managers can clear any
+      if (req.user.role === 'rep') {
+        const acct = await queryOne('SELECT assigned_rep_id FROM accounts WHERE id=$1 AND deleted_at IS NULL', [accountId]);
+        if (!acct) return res.status(404).json({ error: 'Account not found' });
+        if (acct.assigned_rep_id !== req.user.userId) {
+          return res.status(403).json({ error: 'You can only clear follow-ups on your own accounts' });
+        }
+      }
+      await execute('UPDATE accounts SET follow_up_date = NULL, updated_at = NOW() WHERE id = $1', [accountId]);
+      await execute('INSERT INTO notes (account_id, created_by_id, content) VALUES ($1, $2, $3)',
+        [accountId, req.user.userId, '[Follow-up cleared]']);
+      res.json({ success: true });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
   // ─── VOICE FOLLOW-UP (quick create from voice command) ───
   app.post('/api/voice-follow-up', authenticate, async (req, res) => {
     try {

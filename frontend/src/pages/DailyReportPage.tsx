@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { Calendar, FileText, Clock, AlertCircle, Users, MessageSquare, AlertOctagon, ShoppingCart } from 'lucide-react';
+import { Calendar, FileText, Clock, AlertCircle, Users, MessageSquare, AlertOctagon, ShoppingCart, Pencil, Check, X } from 'lucide-react';
 import { api } from '../services/api';
 import { User } from '../types';
 import NoteCommentThread from '../components/comments/NoteCommentThread';
@@ -17,6 +17,7 @@ interface FollowUpRow {
   account_id: number;
   shop_name: string;
   follow_up_date: string;
+  follow_up_note?: string | null;
   days_until?: number;
   days_overdue?: number;
 }
@@ -116,6 +117,139 @@ function CountdownChip({ days, overdue }: { days?: number; overdue?: number }) {
   );
 }
 
+function EditableFollowUp({ f, onUpdated }: { f: FollowUpRow; onUpdated: () => void }) {
+  const [editing, setEditing] = useState(false);
+  const [newDate, setNewDate] = useState(f.follow_up_date);
+  const [newNotes, setNewNotes] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [toast, setToast] = useState('');
+
+  // Parse note — strip the "[Follow-up ...]" prefix for display
+  const cleanNote = f.follow_up_note
+    ? f.follow_up_note.replace(/^\[Follow-up[^\]]*\]\s*/, '').trim()
+    : '';
+
+  const fmtDate = (d: string) => {
+    try {
+      return new Date(d + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
+    } catch { return d; }
+  };
+
+  const handleSave = async () => {
+    if (!newDate) return;
+    setSaving(true);
+    try {
+      await api.patch(`/accounts/${f.account_id}/follow-up`, {
+        follow_up_date: newDate,
+        follow_up_notes: newNotes || undefined,
+      });
+      setEditing(false);
+      setToast('Rescheduled');
+      setTimeout(() => { setToast(''); onUpdated(); }, 1500);
+    } catch (err) {
+      console.error(err);
+      setToast('Error saving');
+      setTimeout(() => setToast(''), 3000);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  if (!editing) {
+    return (
+      <li className="p-3">
+        <div className="flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2 min-w-0 flex-1">
+            <Link to={`/accounts/${f.account_id}`} className="text-sm font-medium text-navy-800 hover:text-brand-600 truncate">
+              {f.shop_name}
+            </Link>
+            {toast && (
+              <span className="text-xs font-medium text-green-600 bg-green-50 px-2 py-0.5 rounded-full">{toast}</span>
+            )}
+          </div>
+          <div className="flex items-center gap-2 flex-shrink-0">
+            <span className="text-xs text-navy-500 hidden sm:inline">{fmtDate(f.follow_up_date)}</span>
+            <CountdownChip days={f.days_until} overdue={f.days_overdue} />
+            <button
+              onClick={() => { setEditing(true); setNewDate(f.follow_up_date); setNewNotes(''); }}
+              className="p-1 text-navy-400 hover:text-brand-600 hover:bg-brand-50 rounded transition"
+              title="Reschedule / Edit"
+            >
+              <Pencil className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        </div>
+        {cleanNote && (
+          <div className="text-xs text-navy-500 mt-1 line-clamp-1 pl-0">{cleanNote}</div>
+        )}
+      </li>
+    );
+  }
+
+  return (
+    <li className="p-3 bg-amber-50/50 border-l-2 border-amber-400">
+      <div className="flex items-center justify-between gap-2 mb-2">
+        <Link to={`/accounts/${f.account_id}`} className="text-sm font-medium text-navy-800 hover:text-brand-600 truncate">
+          {f.shop_name}
+        </Link>
+        <span className="text-xs font-semibold text-amber-600">Rescheduling</span>
+      </div>
+      <div className="flex flex-col sm:flex-row gap-2">
+        <div className="flex items-center gap-2 flex-1">
+          <input
+            type="date"
+            value={newDate}
+            onChange={e => setNewDate(e.target.value)}
+            min={new Date().toISOString().split('T')[0]}
+            className="input-field text-sm py-1.5 flex-1"
+          />
+          <div className="flex gap-1">
+            {[1, 3, 7, 14].map(days => (
+              <button
+                key={days}
+                onClick={() => {
+                  const d = new Date();
+                  d.setDate(d.getDate() + days);
+                  setNewDate(d.toISOString().split('T')[0]);
+                }}
+                className="text-[10px] font-medium px-1.5 py-1 rounded bg-navy-100 text-navy-600 hover:bg-navy-200 transition"
+              >
+                +{days}d
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+      <input
+        placeholder="Reason for change (optional)"
+        value={newNotes}
+        onChange={e => setNewNotes(e.target.value)}
+        className="input-field text-sm py-1.5 mt-2 w-full"
+      />
+      {cleanNote && (
+        <div className="text-xs text-navy-400 mt-1 italic">Previous: {cleanNote}</div>
+      )}
+      <div className="flex gap-2 mt-2">
+        <button
+          onClick={handleSave}
+          disabled={saving || !newDate}
+          className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-medium bg-brand-500 text-white rounded-lg hover:bg-brand-600 transition disabled:opacity-50"
+        >
+          <Check className="w-3.5 h-3.5" />
+          {saving ? 'Saving...' : 'Save'}
+        </button>
+        <button
+          onClick={() => setEditing(false)}
+          className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-medium text-navy-600 bg-white border border-navy-200 rounded-lg hover:bg-navy-50 transition"
+        >
+          <X className="w-3.5 h-3.5" />
+          Cancel
+        </button>
+      </div>
+    </li>
+  );
+}
+
 type FilterKey = 'all' | 'notes' | 'due' | 'overdue' | 'upcoming' | 'holds' | 'reorder';
 
 function StatCard({ icon, label, value, color = 'navy', active, onClick }: { icon: React.ReactNode; label: string; value: number; color?: string; active?: boolean; onClick?: () => void }) {
@@ -173,7 +307,7 @@ function NoteWithThread({ note, currentUser, noteAuthorId }: { note: NoteRow; cu
   );
 }
 
-function ReportBody({ report, currentUser, noteAuthorId }: { report: DailyReportPayload; currentUser: User; noteAuthorId: number }) {
+function ReportBody({ report, currentUser, noteAuthorId, onReload }: { report: DailyReportPayload; currentUser: User; noteAuthorId: number; onReload?: () => void }) {
   const [filter, setFilter] = useState<FilterKey>('all');
   const toggle = (k: FilterKey) => setFilter(f => (f === k ? 'all' : k));
   const show = (k: FilterKey) => filter === 'all' || filter === k;
@@ -211,12 +345,7 @@ function ReportBody({ report, currentUser, noteAuthorId }: { report: DailyReport
           </h3>
           <ul className="bg-white border border-red-100 rounded-lg divide-y divide-red-50">
             {report.followups_overdue_list.map(f => (
-              <li key={f.account_id} className="p-3 flex items-center justify-between">
-                <Link to={`/accounts/${f.account_id}`} className="text-sm font-medium text-navy-800 hover:text-brand-600">
-                  {f.shop_name}
-                </Link>
-                <CountdownChip overdue={f.days_overdue} />
-              </li>
+              <EditableFollowUp key={f.account_id} f={f} onUpdated={() => onReload?.()} />
             ))}
           </ul>
         </section>
@@ -227,12 +356,7 @@ function ReportBody({ report, currentUser, noteAuthorId }: { report: DailyReport
           <h3 className="font-semibold text-amber-800 mb-2">Due Today</h3>
           <ul className="bg-white border border-amber-100 rounded-lg divide-y divide-amber-50">
             {report.followups_due_list.map(f => (
-              <li key={f.account_id} className="p-3 flex items-center justify-between">
-                <Link to={`/accounts/${f.account_id}`} className="text-sm font-medium text-navy-800 hover:text-brand-600">
-                  {f.shop_name}
-                </Link>
-                <CountdownChip days={0} />
-              </li>
+              <EditableFollowUp key={f.account_id} f={f} onUpdated={() => onReload?.()} />
             ))}
           </ul>
         </section>
@@ -243,12 +367,7 @@ function ReportBody({ report, currentUser, noteAuthorId }: { report: DailyReport
           <h3 className="font-semibold text-navy-700 mb-2">Upcoming (Next 7 Days)</h3>
           <ul className="bg-white border border-navy-100 rounded-lg divide-y divide-navy-50">
             {report.followups_upcoming_list.map(f => (
-              <li key={f.account_id} className="p-3 flex items-center justify-between">
-                <Link to={`/accounts/${f.account_id}`} className="text-sm font-medium text-navy-800 hover:text-brand-600">
-                  {f.shop_name}
-                </Link>
-                <CountdownChip days={f.days_until} />
-              </li>
+              <EditableFollowUp key={f.account_id} f={f} onUpdated={() => onReload?.()} />
             ))}
           </ul>
         </section>
@@ -467,13 +586,13 @@ export default function DailyReportPage({ user }: { user: User }) {
                   </div>
                 )}
               </summary>
-              {rep.report && <div className="p-4 border-t border-navy-100"><ReportBody report={rep.report} currentUser={user} noteAuthorId={rep.user_id} /></div>}
+              {rep.report && <div className="p-4 border-t border-navy-100"><ReportBody report={rep.report} currentUser={user} noteAuthorId={rep.user_id} onReload={load} /></div>}
             </details>
           ))}
         </div>
       )}
 
-      {!loading && !error && !teamView && personal && <ReportBody report={personal} currentUser={user} noteAuthorId={user.id} />}
+      {!loading && !error && !teamView && personal && <ReportBody report={personal} currentUser={user} noteAuthorId={user.id} onReload={load} />}
       {!loading && !error && !teamView && !personal && (
         <div className="bg-white border border-navy-100 rounded-xl p-8 text-center text-navy-400">
           No data yet — your first report will appear after your next activity.

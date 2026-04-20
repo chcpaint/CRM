@@ -47,9 +47,27 @@ export default function AccountDetailPage({ user }: Props) {
     }
   };
 
-  // Note input
-  const [newNote, setNewNote] = useState('');
+  // Note input — with auto-save draft
+  const draftKey = `note-draft-${id}`;
+  const [newNote, setNewNote] = useState(() => {
+    try { return sessionStorage.getItem(draftKey) || ''; } catch { return ''; }
+  });
   const [savingNote, setSavingNote] = useState(false);
+  const [draftRestored, setDraftRestored] = useState(() => {
+    try { return !!(sessionStorage.getItem(draftKey)); } catch { return false; }
+  });
+
+  // Auto-save draft to sessionStorage on every change
+  useEffect(() => {
+    try {
+      if (newNote.trim()) {
+        sessionStorage.setItem(draftKey, newNote);
+      } else {
+        sessionStorage.removeItem(draftKey);
+        setDraftRestored(false);
+      }
+    } catch { /* ignore storage errors */ }
+  }, [newNote, draftKey]);
 
   // Note activity type (optional dropdown beside note)
   const [noteActivityType, setNoteActivityType] = useState('none');
@@ -226,6 +244,8 @@ export default function AccountDetailPage({ user }: Props) {
       }
       setNewNote('');
       setNoteActivityType('none');
+      setDraftRestored(false);
+      try { sessionStorage.removeItem(draftKey); } catch {}
       loadAccount();
     } catch (err) {
       console.error(err);
@@ -886,6 +906,11 @@ export default function AccountDetailPage({ user }: Props) {
           <div className={`card transition-all ${newNote.trim() ? 'ring-2 ring-amber-400 border-amber-300' : ''}`}>
             <div className="flex items-center justify-between mb-3">
               <h3 className="font-bold text-navy-900">Add Note</h3>
+              {draftRestored && newNote.trim() && (
+                <span className="text-xs font-semibold text-blue-600 bg-blue-50 border border-blue-200 px-2 py-0.5 rounded-full">
+                  Draft restored
+                </span>
+              )}
               {newNote.trim() && (
                 <span className="text-xs font-semibold text-amber-600 bg-amber-50 border border-amber-200 px-2 py-0.5 rounded-full animate-pulse-soft">
                   Unsaved — don't forget to Save!
@@ -948,19 +973,39 @@ export default function AccountDetailPage({ user }: Props) {
               <div>
                 <h3 className="font-bold text-navy-900">Follow-up</h3>
                 {account.follow_up_date && !showFollowUp && (
-                  <p className="text-xs text-navy-500 mt-1">
-                    Scheduled: <span className={`font-medium ${new Date(account.follow_up_date) < new Date() ? 'text-red-600' : 'text-amber-600'}`}>
-                      {new Date(account.follow_up_date).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })}
+                  <button
+                    onClick={() => { setShowFollowUp(true); setFollowUpDate(account.follow_up_date || ''); }}
+                    className="text-xs text-navy-500 mt-1 flex items-center gap-1 hover:text-brand-600 transition group"
+                  >
+                    Scheduled: <span className={`font-medium ${new Date(account.follow_up_date) < new Date() ? 'text-red-600' : 'text-amber-600'} group-hover:underline`}>
+                      {new Date(account.follow_up_date + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })}
                       {new Date(account.follow_up_date) < new Date() && ' (overdue)'}
                     </span>
-                  </p>
+                    <span className="text-navy-400 group-hover:text-brand-500 text-[10px]">tap to edit</span>
+                  </button>
                 )}
               </div>
-              {!showFollowUp && (
-                <button onClick={() => { setShowFollowUp(true); setFollowUpDate(account.follow_up_date || ''); }} className="btn-ghost text-sm">
-                  {account.follow_up_date ? 'Reschedule' : 'Schedule'}
-                </button>
-              )}
+              <div className="flex gap-2">
+                {account.follow_up_date && !showFollowUp && (
+                  <button
+                    onClick={async () => {
+                      if (!confirm('Clear this follow-up?')) return;
+                      try {
+                        await api.delete(`/accounts/${id}/follow-up`);
+                        loadAccount();
+                      } catch (err) { console.error(err); }
+                    }}
+                    className="text-xs text-navy-400 hover:text-red-500 transition"
+                  >
+                    Clear
+                  </button>
+                )}
+                {!showFollowUp && (
+                  <button onClick={() => { setShowFollowUp(true); setFollowUpDate(account.follow_up_date || ''); }} className="btn-ghost text-sm">
+                    {account.follow_up_date ? 'Reschedule' : 'Schedule'}
+                  </button>
+                )}
+              </div>
             </div>
             {showFollowUp && (
               <div className="space-y-3">

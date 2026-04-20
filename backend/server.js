@@ -854,7 +854,10 @@ async function startServer() {
   app.get('/api/sales/revenue-summary', authenticate, async (req, res) => {
     try {
       const year = req.query.year || String(new Date().getFullYear());
-      const currentMonth = new Date().toISOString().slice(0, 7); // e.g. "2026-04"
+      // If a specific month is passed (e.g. "04"), build YYYY-MM; otherwise use current calendar month
+      const currentMonth = req.query.month
+        ? `${year}-${req.query.month.padStart(2, '0')}`
+        : new Date().toISOString().slice(0, 7); // e.g. "2026-04"
       const isRep = req.user.role === 'rep';
       const uid = req.user.userId;
 

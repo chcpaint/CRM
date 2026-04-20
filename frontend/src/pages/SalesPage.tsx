@@ -16,6 +16,7 @@ export default function SalesPage({ user }: Props) {
   const [filterCustomer, setFilterCustomer] = useState<string>('');
   const [filterSalesperson, setFilterSalesperson] = useState<string>('');
   const [filterYear, setFilterYear] = useState<string>(String(new Date().getFullYear()));
+  const [filterMonth, setFilterMonth] = useState<string>('all');
   const [voiceMatchFeedback, setVoiceMatchFeedback] = useState<string>('');
   const [revSummary, setRevSummary] = useState<{
     year: string;
@@ -126,10 +127,13 @@ export default function SalesPage({ user }: Props) {
     }
   };
 
-  const loadRevenueSummary = async (yr?: string) => {
+  const loadRevenueSummary = async (yr?: string, mo?: string) => {
     try {
       setRevError(false);
-      const data = await api.get('/sales/revenue-summary', { year: yr || filterYear });
+      const params: Record<string, string> = { year: yr || filterYear };
+      const monthVal = mo ?? filterMonth;
+      if (monthVal && monthVal !== 'all') params.month = monthVal;
+      const data = await api.get('/sales/revenue-summary', params);
       if (data && data.company) {
         setRevSummary(data);
       }
@@ -139,8 +143,8 @@ export default function SalesPage({ user }: Props) {
     }
   };
 
-  // Load revenue summary on mount and when year filter changes
-  useEffect(() => { loadRevenueSummary(filterYear); }, [filterYear]);
+  // Load revenue summary on mount and when year/month filter changes
+  useEffect(() => { loadRevenueSummary(filterYear, filterMonth); }, [filterYear, filterMonth]);
 
   // Build YTD breakdown for a customer's sales items
   const buildBreakdown = (items: any[]) => {
@@ -180,6 +184,10 @@ export default function SalesPage({ user }: Props) {
     if (filterCustomer && (s.customer_name || s.shop_name || '') !== filterCustomer) return false;
     if (filterSalesperson && (s.salesperson || '') !== filterSalesperson) return false;
     if (filterYear !== 'all' && !(s.sale_date || '').startsWith(filterYear)) return false;
+    if (filterMonth !== 'all' && filterYear !== 'all') {
+      const saleMonth = (s.sale_date || '').slice(5, 7);
+      if (saleMonth !== filterMonth) return false;
+    }
     return true;
   });
 
@@ -221,7 +229,7 @@ export default function SalesPage({ user }: Props) {
 
   const fmtMoney = (n: number) => '$' + n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
-  const activeFilters = (filterCustomer ? 1 : 0) + (filterSalesperson ? 1 : 0) + (filterYear !== 'all' && filterYear !== String(new Date().getFullYear()) ? 1 : 0);
+  const activeFilters = (filterCustomer ? 1 : 0) + (filterSalesperson ? 1 : 0) + (filterYear !== 'all' && filterYear !== String(new Date().getFullYear()) ? 1 : 0) + (filterMonth !== 'all' ? 1 : 0);
   const availableYears = [...new Set(sales.map(s => (s.sale_date || '').slice(0, 4)).filter(Boolean))].sort((a, b) => b.localeCompare(a));
 
   // Compute all unique PCR categories across entire sales dataset (for "not purchased" feature)
@@ -254,7 +262,7 @@ export default function SalesPage({ user }: Props) {
               </span>
             </div>
             <span className="text-xs text-brand-600">
-              {filterYear === 'all' ? 'All years' : `Year: ${filterYear}`} &middot; {filteredSales.length.toLocaleString()} of {sales.length.toLocaleString()} records &middot; {allCustomers.length} customers
+              {filterYear === 'all' ? 'All years' : `Year: ${filterYear}`}{filterMonth !== 'all' ? ` · ${['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][parseInt(filterMonth,10)-1]}` : ''} &middot; {filteredSales.length.toLocaleString()} of {sales.length.toLocaleString()} records &middot; {allCustomers.length} customers
             </span>
           </div>
         );
@@ -289,6 +297,26 @@ export default function SalesPage({ user }: Props) {
               {allSalespersons.map(sp => <option key={sp} value={sp}>{sp}</option>)}
             </select>
           )}
+          <select
+            value={filterMonth}
+            onChange={e => { setFilterMonth(e.target.value); setExpandedSale(null); }}
+            className="input-field text-sm py-2"
+            title="Filter by month"
+          >
+            <option value="all">All Months</option>
+            <option value="01">January</option>
+            <option value="02">February</option>
+            <option value="03">March</option>
+            <option value="04">April</option>
+            <option value="05">May</option>
+            <option value="06">June</option>
+            <option value="07">July</option>
+            <option value="08">August</option>
+            <option value="09">September</option>
+            <option value="10">October</option>
+            <option value="11">November</option>
+            <option value="12">December</option>
+          </select>
           {availableYears.length > 1 && (
             <select
               value={filterYear}
@@ -303,7 +331,7 @@ export default function SalesPage({ user }: Props) {
           {activeFilters > 0 && (
             <div className="flex items-center justify-between sm:justify-start gap-3">
               <button
-                onClick={() => { setFilterCustomer(''); setFilterSalesperson(''); setFilterYear(String(new Date().getFullYear())); setExpandedSale(null); }}
+                onClick={() => { setFilterCustomer(''); setFilterSalesperson(''); setFilterYear(String(new Date().getFullYear())); setFilterMonth('all'); setExpandedSale(null); }}
                 className="text-xs text-brand-600 hover:text-brand-800 underline"
               >
                 Clear filters ({activeFilters})
@@ -318,13 +346,18 @@ export default function SalesPage({ user }: Props) {
 
       {/* Revenue Summary Bar */}
       {revSummary && (() => {
-        const monthName = (() => {
-          try {
-            const [y, m] = revSummary.currentMonth.split('-');
-            return new Date(Number(y), Number(m) - 1).toLocaleString('en-US', { month: 'long' });
-          } catch { return revSummary.currentMonth; }
-        })();
+        const monthNames = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+        const selectedMonthIdx = filterMonth !== 'all' ? parseInt(filterMonth, 10) - 1 : null;
+        const monthName = selectedMonthIdx !== null
+          ? monthNames[selectedMonthIdx]
+          : (() => {
+              try {
+                const [, m] = revSummary.currentMonth.split('-');
+                return monthNames[Number(m) - 1];
+              } catch { return revSummary.currentMonth; }
+            })();
         const yr = revSummary.year;
+        const isSpecificMonth = filterMonth !== 'all';
 
         // If a salesperson is selected or user is a rep, show individual numbers; otherwise company totals
         const isRepUser = user.role === 'rep';
@@ -342,19 +375,23 @@ export default function SalesPage({ user }: Props) {
         const isCurrentYear = yr === String(new Date().getFullYear());
         const fmtRev = (n: number) => '$' + Math.round(n).toLocaleString('en-US');
 
+        // When a specific month is selected, month_revenue = that month, ytd = year total
+        // When "All Months", month_revenue = current calendar month, ytd = year total
+        const showMonthSection = filterYear !== 'all' && (isCurrentYear || isSpecificMonth);
+
         return (
           <div className="bg-green-50 border border-green-300 rounded-xl px-4 sm:px-5 py-3 mb-4 sm:mb-5 shadow-sm">
             <div className="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-6">
               <div className="text-sm font-bold text-green-900 min-w-0 truncate">{label}</div>
               <div className="flex flex-wrap items-center gap-4 sm:gap-6">
-                {isCurrentYear && filterYear !== 'all' && (
+                {showMonthSection && (
                   <div className="flex items-baseline gap-1.5">
                     <span className="text-lg sm:text-xl font-bold text-green-800">{fmtRev(showMonth)}</span>
                     <span className="text-xs text-green-600 font-semibold">({monthName})</span>
                   </div>
                 )}
                 <div className="flex items-baseline gap-1.5">
-                  <span className={`font-bold text-green-800 ${isCurrentYear && filterYear !== 'all' ? 'text-base' : 'text-lg sm:text-xl'}`}>
+                  <span className={`font-bold text-green-800 ${showMonthSection ? 'text-base' : 'text-lg sm:text-xl'}`}>
                     {fmtRev(showYtd)}
                   </span>
                   <span className="text-xs text-green-600 font-semibold">
@@ -367,17 +404,17 @@ export default function SalesPage({ user }: Props) {
             {!filterSalesperson && !isRepUser && revSummary.salespersons.length > 0 && (
               <div className="mt-2 pt-2 border-t border-green-200 grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-x-4 gap-y-1.5">
                 {revSummary.salespersons
-                  .filter(s => (isCurrentYear && filterYear !== 'all') ? s.month_revenue > 0 : s.ytd_revenue > 0)
+                  .filter(s => showMonthSection ? s.month_revenue > 0 : s.ytd_revenue > 0)
                   .map(s => (
                   <div key={s.salesperson} className="flex items-baseline justify-between gap-2 text-xs">
                     <span className="text-green-800 truncate font-medium">{s.salesperson}</span>
                     <span className="font-bold text-green-900 tabular-nums flex-shrink-0">
-                      {isCurrentYear && filterYear !== 'all'
+                      {showMonthSection
                         ? fmtRev(s.month_revenue)
                         : fmtRev(s.ytd_revenue)
                       }
                       <span className="text-green-500 font-normal ml-1">
-                        ({isCurrentYear && filterYear !== 'all' ? monthName.slice(0, 3) : 'YTD'})
+                        ({showMonthSection ? monthName.slice(0, 3) : 'YTD'})
                       </span>
                     </span>
                   </div>

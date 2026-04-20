@@ -1009,7 +1009,7 @@ export default function AdminPage({ user }: Props) {
 
             {gdriveStatus === null ? (
               <div className="text-sm text-navy-400">Loading status...</div>
-            ) : !gdriveStatus.configured ? (
+            ) : !gdriveStatus!.configured ? (
               <div className="p-4 rounded-xl bg-amber-50 border border-amber-200">
                 <p className="text-amber-800 font-medium mb-2">Not configured yet</p>
                 <p className="text-sm text-amber-700 mb-3">
@@ -1022,7 +1022,9 @@ export default function AdminPage({ user }: Props) {
                 </div>
                 <p className="text-xs text-amber-600 mt-3">See the setup guide in the project README for step-by-step instructions.</p>
               </div>
-            ) : (
+            ) : (() => {
+              const gs = gdriveStatus!;
+              return (
               <div className="space-y-3">
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                   <div className="p-3 rounded-xl bg-green-50 border border-green-200">
@@ -1031,27 +1033,28 @@ export default function AdminPage({ user }: Props) {
                   </div>
                   <div className="p-3 rounded-xl bg-navy-50 border border-navy-200">
                     <div className="text-xs text-navy-500 font-medium">Schedule</div>
-                    <div className="text-sm font-bold text-navy-800 mt-0.5">{gdriveStatus.cronSchedule || '10AM weekdays'}</div>
+                    <div className="text-sm font-bold text-navy-800 mt-0.5">{gs.cronSchedule || '10AM weekdays'}</div>
                   </div>
                   <div className="p-3 rounded-xl bg-navy-50 border border-navy-200">
                     <div className="text-xs text-navy-500 font-medium">Last Run</div>
                     <div className="text-sm font-bold text-navy-800 mt-0.5">
-                      {gdriveStatus.lastRun
-                        ? new Date(gdriveStatus.lastRun.created_at).toLocaleString()
+                      {gs.lastRun
+                        ? new Date(gs.lastRun.created_at).toLocaleString()
                         : 'Never'}
                     </div>
                   </div>
                 </div>
 
-                {gdriveStatus.lastRun && (
+                {gs.lastRun && (
                   <div className="text-xs text-navy-500">
-                    Last result: {gdriveStatus.lastRun.status === 'success'
-                      ? `${gdriveStatus.lastRun.records_imported} records from ${gdriveStatus.lastRun.files_processed} file(s)`
-                      : `Error: ${gdriveStatus.lastRun.error_message}`}
+                    Last result: {gs.lastRun.status === 'success'
+                      ? `${gs.lastRun.records_imported} records from ${gs.lastRun.files_processed} file(s)`
+                      : `Error: ${gs.lastRun.error_message}`}
                   </div>
                 )}
               </div>
-            )}
+              );
+            })()}
           </div>}
 
           {/* Import History — hidden alongside Google Drive import */}

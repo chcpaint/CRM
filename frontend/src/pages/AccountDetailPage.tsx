@@ -53,6 +53,7 @@ export default function AccountDetailPage({ user }: Props) {
     try { return sessionStorage.getItem(draftKey) || ''; } catch { return ''; }
   });
   const [savingNote, setSavingNote] = useState(false);
+  const [noteSaved, setNoteSaved] = useState(false);   // "Note Saved!" confirmation state
   const [draftRestored, setDraftRestored] = useState(() => {
     try { return !!(sessionStorage.getItem(draftKey)); } catch { return false; }
   });
@@ -243,7 +244,7 @@ export default function AccountDetailPage({ user }: Props) {
   };
 
   const saveNote = async () => {
-    if (!newNote.trim()) return;
+    if (!newNote.trim() || savingNote) return;
     setSavingNote(true);
     try {
       await api.post(`/accounts/${id}/notes`, {
@@ -257,10 +258,16 @@ export default function AccountDetailPage({ user }: Props) {
           description: newNote.trim()
         });
       }
+      // Clear everything first, then remove from storage
       setNewNote('');
       setNoteActivityType('none');
       setDraftRestored(false);
       try { sessionStorage.removeItem(draftKey); } catch {}
+
+      // Show "Note Saved!" confirmation
+      setNoteSaved(true);
+      setTimeout(() => setNoteSaved(false), 3000);
+
       loadAccount();
     } catch (err) {
       console.error(err);
@@ -922,68 +929,94 @@ export default function AccountDetailPage({ user }: Props) {
         {/* Notes & Activities — full width */}
         <div className="space-y-4 sm:space-y-6">
           {/* Add Note — with optional activity type dropdown */}
-          <div className={`card transition-all ${newNote.trim() ? 'ring-2 ring-amber-400 border-amber-300' : ''}`}>
+          <div className={`card transition-all ${noteSaved ? 'ring-2 ring-green-400 border-green-300' : newNote.trim() ? 'ring-2 ring-amber-400 border-amber-300' : ''}`}>
             <div className="flex items-center justify-between mb-3">
               <h3 className="font-bold text-navy-900">Add Note</h3>
-              {draftRestored && newNote.trim() && (
-                <span className="text-xs font-semibold text-blue-600 bg-blue-50 border border-blue-200 px-2 py-0.5 rounded-full">
-                  Draft restored
-                </span>
-              )}
-              {newNote.trim() && (
-                <span className="text-xs font-semibold text-amber-600 bg-amber-50 border border-amber-200 px-2 py-0.5 rounded-full animate-pulse-soft">
-                  Unsaved — don't forget to Save!
-                </span>
-              )}
-            </div>
-            <div className="relative">
-              <textarea
-                value={newNote}
-                onChange={(e) => setNewNote(e.target.value)}
-                placeholder="Type a note or use voice input..."
-                className="input-field min-h-[60px] resize-none pr-10 w-full"
-                rows={2}
-              />
-              {isSupported && (
-                <button
-                  onClick={isListening ? stopListening : startListening}
-                  className={`absolute right-2 top-2 p-1.5 rounded-lg transition-colors ${
-                    isListening ? 'text-brand-500 bg-brand-50' : 'text-navy-400 hover:text-navy-600'
-                  }`}
-                  title={isListening ? 'Stop recording' : 'Voice input'}
-                >
-                  {isListening && <div className="absolute inset-0 bg-brand-500/20 rounded-full voice-pulse" />}
-                  <svg className="w-5 h-5 relative" fill="currentColor" viewBox="0 0 24 24">
-                    <path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3z" />
-                    <path d="M17 11c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z" />
-                  </svg>
-                </button>
-              )}
-            </div>
-            {isListening && (
-              <div className="text-xs text-brand-500 mt-2 flex items-center gap-1">
-                <div className="w-2 h-2 bg-brand-500 rounded-full animate-pulse" />
-                Listening... speak now
+              <div className="flex items-center gap-2">
+                {draftRestored && newNote.trim() && (
+                  <span className="text-xs font-semibold text-blue-600 bg-blue-50 border border-blue-200 px-2 py-0.5 rounded-full">
+                    Draft restored
+                  </span>
+                )}
+                {noteSaved && (
+                  <span className="text-xs font-bold text-green-700 bg-green-100 border border-green-300 px-3 py-1 rounded-full flex items-center gap-1">
+                    <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7" />
+                    </svg>
+                    Note Saved!
+                  </span>
+                )}
+                {!noteSaved && newNote.trim() && (
+                  <span className="text-xs font-semibold text-amber-600 bg-amber-50 border border-amber-200 px-2 py-0.5 rounded-full animate-pulse-soft">
+                    Unsaved — don't forget to Save!
+                  </span>
+                )}
               </div>
-            )}
-            <div className="flex items-center gap-2 mt-3">
-              <select
-                value={noteActivityType}
-                onChange={e => setNoteActivityType(e.target.value)}
-                className="input-field w-auto text-sm"
-              >
-                <option value="none">Note only</option>
-                {Object.entries(ACTIVITY_TAGS).map(([key, { label, icon }]) => (
-                  <option key={key} value={key}>{icon} {label}</option>
-                ))}
-              </select>
-              <span className="text-xs text-navy-400 hidden sm:inline">
-                {noteActivityType !== 'none' ? `Will also log as: ${ACTIVITY_TAGS[noteActivityType]?.label}` : 'Optional: tag as activity type'}
-              </span>
-              <button onClick={saveNote} disabled={savingNote || !newNote.trim()} className="btn-primary ml-auto">
-                {savingNote ? '...' : 'Save'}
-              </button>
             </div>
+            {noteSaved ? (
+              <div className="bg-green-50 border border-green-200 rounded-xl p-6 text-center">
+                <div className="text-3xl mb-2">&#10003;</div>
+                <p className="text-green-800 font-semibold">Note saved successfully!</p>
+                <p className="text-green-600 text-sm mt-1">Your note has been added to the timeline below.</p>
+                <button
+                  onClick={() => setNoteSaved(false)}
+                  className="mt-3 text-sm text-green-700 hover:text-green-900 underline"
+                >
+                  Add another note
+                </button>
+              </div>
+            ) : (
+              <>
+                <div className="relative">
+                  <textarea
+                    value={newNote}
+                    onChange={(e) => setNewNote(e.target.value)}
+                    placeholder="Type a note or use voice input..."
+                    className="input-field min-h-[60px] resize-none pr-10 w-full"
+                    rows={2}
+                  />
+                  {isSupported && (
+                    <button
+                      onClick={isListening ? stopListening : startListening}
+                      className={`absolute right-2 top-2 p-1.5 rounded-lg transition-colors ${
+                        isListening ? 'text-brand-500 bg-brand-50' : 'text-navy-400 hover:text-navy-600'
+                      }`}
+                      title={isListening ? 'Stop recording' : 'Voice input'}
+                    >
+                      {isListening && <div className="absolute inset-0 bg-brand-500/20 rounded-full voice-pulse" />}
+                      <svg className="w-5 h-5 relative" fill="currentColor" viewBox="0 0 24 24">
+                        <path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3z" />
+                        <path d="M17 11c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z" />
+                      </svg>
+                    </button>
+                  )}
+                </div>
+                {isListening && (
+                  <div className="text-xs text-brand-500 mt-2 flex items-center gap-1">
+                    <div className="w-2 h-2 bg-brand-500 rounded-full animate-pulse" />
+                    Listening... speak now
+                  </div>
+                )}
+                <div className="flex items-center gap-2 mt-3">
+                  <select
+                    value={noteActivityType}
+                    onChange={e => setNoteActivityType(e.target.value)}
+                    className="input-field w-auto text-sm"
+                  >
+                    <option value="none">Note only</option>
+                    {Object.entries(ACTIVITY_TAGS).map(([key, { label, icon }]) => (
+                      <option key={key} value={key}>{icon} {label}</option>
+                    ))}
+                  </select>
+                  <span className="text-xs text-navy-400 hidden sm:inline">
+                    {noteActivityType !== 'none' ? `Will also log as: ${ACTIVITY_TAGS[noteActivityType]?.label}` : 'Optional: tag as activity type'}
+                  </span>
+                  <button onClick={saveNote} disabled={savingNote || !newNote.trim()} className="btn-primary ml-auto">
+                    {savingNote ? 'Saving...' : 'Save'}
+                  </button>
+                </div>
+              </>
+            )}
           </div>
 
           {/* Follow-up Scheduling */}

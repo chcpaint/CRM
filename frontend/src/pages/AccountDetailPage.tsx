@@ -1,5 +1,5 @@
-import { useState, useEffect } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useState, useEffect, useCallback } from 'react';
+import { useParams, useNavigate, useBlocker } from 'react-router-dom';
 import { api } from '../services/api';
 import { User, Account, Note, Activity, PhoneEntry, EmailEntry, STATUS_LABELS, STATUS_COLORS, StatusType } from '../types';
 import { useVoiceInput } from '../hooks/useVoiceInput';
@@ -67,6 +67,30 @@ export default function AccountDetailPage({ user }: Props) {
   const [showTransferModal, setShowTransferModal] = useState(false);
   const [transferMode, setTransferMode] = useState<'copy' | 'move'>('copy');
 
+  // Edit note (declared early for unsaved-changes guard)
+  const [editingNoteId, setEditingNoteId] = useState<number | null>(null);
+  const [editNoteContent, setEditNoteContent] = useState('');
+  const [savingEditNote, setSavingEditNote] = useState(false);
+
+  // ─── Unsaved-changes guard ───
+  // Dirty when note textarea has content OR an existing note is being edited
+  const hasUnsavedWork = newNote.trim().length > 0 || editingNoteId !== null;
+
+  // Browser close / refresh guard
+  useEffect(() => {
+    if (!hasUnsavedWork) return;
+    const handler = (e: BeforeUnloadEvent) => { e.preventDefault(); };
+    window.addEventListener('beforeunload', handler);
+    return () => window.removeEventListener('beforeunload', handler);
+  }, [hasUnsavedWork]);
+
+  // In-app navigation guard (React Router)
+  const blocker = useBlocker(
+    useCallback(({ currentLocation, nextLocation }: { currentLocation: { pathname: string }; nextLocation: { pathname: string } }) =>
+      hasUnsavedWork && currentLocation.pathname !== nextLocation.pathname,
+    [hasUnsavedWork])
+  );
+
   // Check for matching active customer when viewing a lead
   useEffect(() => {
     if (account && account.account_category === 'lead') {
@@ -75,11 +99,6 @@ export default function AccountDetailPage({ user }: Props) {
       }).catch(() => {});
     }
   }, [account?.id, account?.account_category]);
-
-  // Edit note
-  const [editingNoteId, setEditingNoteId] = useState<number | null>(null);
-  const [editNoteContent, setEditNoteContent] = useState('');
-  const [savingEditNote, setSavingEditNote] = useState(false);
 
   // Follow-up scheduling
   const [showFollowUp, setShowFollowUp] = useState(false);
@@ -416,6 +435,41 @@ export default function AccountDetailPage({ user }: Props) {
               <span className="text-xs sm:text-sm font-medium">No email</span>
             </div>
           )}
+        </div>
+      )}
+
+      {/* Unsaved Changes Modal */}
+      {blocker.state === 'blocked' && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-2xl shadow-xl max-w-md w-full p-6 animate-scale-in">
+            <div className="flex items-start gap-3 mb-4">
+              <div className="w-10 h-10 rounded-full bg-amber-100 flex items-center justify-center flex-shrink-0">
+                <svg className="w-5 h-5 text-amber-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4.5c-.77-.833-2.694-.833-3.464 0L3.34 16.5c-.77.833.192 2.5 1.732 2.5z" />
+                </svg>
+              </div>
+              <div>
+                <h3 className="font-bold text-navy-900 text-lg">Save Your Work!</h3>
+                <p className="text-navy-600 text-sm mt-2">
+                  You have unsaved notes that will be lost if you leave this page. Would you like to go back and save your work?
+                </p>
+              </div>
+            </div>
+            <div className="flex gap-2 justify-end">
+              <button
+                onClick={() => blocker.proceed?.()}
+                className="px-4 py-2 text-sm font-medium text-red-600 bg-red-50 border border-red-200 rounded-xl hover:bg-red-100 transition-colors"
+              >
+                Leave Without Saving
+              </button>
+              <button
+                onClick={() => blocker.reset?.()}
+                className="btn-primary"
+              >
+                Go Back & Save
+              </button>
+            </div>
+          </div>
         </div>
       )}
 
@@ -829,8 +883,15 @@ export default function AccountDetailPage({ user }: Props) {
         {/* Notes & Activities — full width */}
         <div className="space-y-4 sm:space-y-6">
           {/* Add Note — with optional activity type dropdown */}
-          <div className="card">
-            <h3 className="font-bold text-navy-900 mb-3">Add Note</h3>
+          <div className={`card transition-all ${newNote.trim() ? 'ring-2 ring-amber-400 border-amber-300' : ''}`}>
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="font-bold text-navy-900">Add Note</h3>
+              {newNote.trim() && (
+                <span className="text-xs font-semibold text-amber-600 bg-amber-50 border border-amber-200 px-2 py-0.5 rounded-full animate-pulse-soft">
+                  Unsaved — don't forget to Save!
+                </span>
+              )}
+            </div>
             <div className="relative">
               <textarea
                 value={newNote}
@@ -1140,7 +1201,10 @@ export default function AccountDetailPage({ user }: Props) {
                           </div>
                           {/* Note content — editable or read-only */}
                           {isEditing ? (
-                            <div className="mt-2 space-y-2">
+                            <div className="mt-2 space-y-2 p-2 rounded-lg ring-2 ring-amber-400 bg-amber-50/30">
+                              <div className="flex items-center justify-between mb-1">
+                                <span className="text-xs font-semibold text-amber-600">Editing — remember to Save!</span>
+                              </div>
                               <textarea
                                 value={editNoteContent}
                                 onChange={e => setEditNoteContent(e.target.value)}

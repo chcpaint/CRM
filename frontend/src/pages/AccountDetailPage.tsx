@@ -1,5 +1,5 @@
-import { useState, useEffect, useCallback } from 'react';
-import { useParams, useNavigate, useBlocker } from 'react-router-dom';
+import { useState, useEffect, useRef } from 'react';
+import { useParams, useNavigate } from 'react-router-dom';
 import { api } from '../services/api';
 import { User, Account, Note, Activity, PhoneEntry, EmailEntry, STATUS_LABELS, STATUS_COLORS, StatusType } from '../types';
 import { useVoiceInput } from '../hooks/useVoiceInput';
@@ -93,6 +93,12 @@ export default function AccountDetailPage({ user }: Props) {
   // ─── Unsaved-changes guard ───
   // Dirty when note textarea has content OR an existing note is being edited
   const hasUnsavedWork = newNote.trim().length > 0 || editingNoteId !== null;
+  const hasUnsavedRef = useRef(hasUnsavedWork);
+  hasUnsavedRef.current = hasUnsavedWork;
+
+  // Show unsaved-changes prompt state
+  const [showLeavePrompt, setShowLeavePrompt] = useState(false);
+  const pendingNavRef = useRef<(() => void) | null>(null);
 
   // Browser close / refresh guard
   useEffect(() => {
@@ -102,12 +108,21 @@ export default function AccountDetailPage({ user }: Props) {
     return () => window.removeEventListener('beforeunload', handler);
   }, [hasUnsavedWork]);
 
-  // In-app navigation guard (React Router)
-  const blocker = useBlocker(
-    useCallback(({ currentLocation, nextLocation }: { currentLocation: { pathname: string }; nextLocation: { pathname: string } }) =>
-      hasUnsavedWork && currentLocation.pathname !== nextLocation.pathname,
-    [hasUnsavedWork])
-  );
+  // Back button guard (popstate)
+  useEffect(() => {
+    if (!hasUnsavedWork) return;
+    // Push a duplicate entry so pressing Back triggers popstate without leaving
+    window.history.pushState(null, '', window.location.href);
+    const handler = () => {
+      if (hasUnsavedRef.current) {
+        // Re-push to keep them on the page until they confirm
+        window.history.pushState(null, '', window.location.href);
+        setShowLeavePrompt(true);
+      }
+    };
+    window.addEventListener('popstate', handler);
+    return () => window.removeEventListener('popstate', handler);
+  }, [hasUnsavedWork]);
 
   // Check for matching active customer when viewing a lead
   useEffect(() => {
@@ -459,7 +474,7 @@ export default function AccountDetailPage({ user }: Props) {
       )}
 
       {/* Unsaved Changes Modal */}
-      {blocker.state === 'blocked' && (
+      {showLeavePrompt && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
           <div className="bg-white rounded-2xl shadow-xl max-w-md w-full p-6 animate-scale-in">
             <div className="flex items-start gap-3 mb-4">
@@ -477,13 +492,17 @@ export default function AccountDetailPage({ user }: Props) {
             </div>
             <div className="flex gap-2 justify-end">
               <button
-                onClick={() => blocker.proceed?.()}
+                onClick={() => {
+                  setShowLeavePrompt(false);
+                  // Actually navigate back
+                  window.history.go(-1);
+                }}
                 className="px-4 py-2 text-sm font-medium text-red-600 bg-red-50 border border-red-200 rounded-xl hover:bg-red-100 transition-colors"
               >
                 Leave Without Saving
               </button>
               <button
-                onClick={() => blocker.reset?.()}
+                onClick={() => setShowLeavePrompt(false)}
                 className="btn-primary"
               >
                 Go Back & Save

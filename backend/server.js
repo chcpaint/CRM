@@ -2741,6 +2741,182 @@ async function startServer() {
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
 
+  // ═══ TEAM ACTIVITY TRACKER ═══
+  // Restricted to specific management users: Adam(1), Frank(4), Manny Pacheco(7), Pino(18)
+  const ACTIVITY_TRACKER_USER_IDS = [1, 4, 7, 18];
+  function canAccessActivityTracker(req, res) {
+    if (!ACTIVITY_TRACKER_USER_IDS.includes(req.user.userId)) {
+      res.status(403).json({ error: 'Access restricted' });
+      return false;
+    }
+    return true;
+  }
+
+  // GET /api/admin/team-activity?period=today|this_week|prior_week|month&month=2026-04&rep_id=3
+  app.get('/api/admin/team-activity', authenticate, async (req, res) => {
+    if (!canAccessActivityTracker(req, res)) return;
+    try {
+      const period = req.query.period || 'this_week';
+      const repId = req.query.rep_id ? parseInt(req.query.rep_id) : null;
+      const monthParam = req.query.month; // e.g. "2026-04"
+
+      // Calculate date range
+      let startDate, endDate;
+      const now = new Date();
+      const today = now.toISOString().slice(0, 10);
+
+      if (period === 'today') {
+        startDate = today;
+        endDate = today;
+      } else if (period === 'this_week') {
+        const day = now.getDay();
+        const monday = new Date(now);
+        monday.setDate(now.getDate() - (day === 0 ? 6 : day - 1));
+        startDate = monday.toISOString().slice(0, 10);
+        endDate = today;
+      } else if (period === 'prior_week') {
+        const day = now.getDay();
+        const monday = new Date(now);
+        monday.setDate(now.getDate() - (day === 0 ? 6 : day - 1));
+        const priorMonday = new Date(monday);
+        priorMonday.setDate(monday.getDate() - 7);
+        const priorSunday = new Date(monday);
+        priorSunday.setDate(monday.getDate() - 1);
+        startDate = priorMonday.toISOString().slice(0, 10);
+        endDate = priorSunday.toISOString().slice(0, 10);
+      } else if (period === 'month' && monthParam) {
+        startDate = `${monthParam}-01`;
+        const [y, m] = monthParam.split('-').map(Number);
+        const lastDay = new Date(y, m, 0).getDate();
+        endDate = `${monthParam}-${String(lastDay).padStart(2, '0')}`;
+      } else {
+        // default: this month
+        const ym = now.toISOString().slice(0, 7);
+        startDate = `${ym}-01`;
+        const lastDay = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
+        endDate = `${ym}-${String(lastDay).padStart(2, '0')}`;
+      }
+
+      // 1) Ranking: note count + follow-up count per rep in period
+      const rankingQuery = `
+        SELECT u.id as rep_id, u.first_name, u.last_name,
+          COALESCE(nc.note_count, 0)::int as note_count,
+          COALESCE(fc.followup_count, 0)::int as followup_count,
+          (COALESCE(nc.note_count, 0) + COALESCE(fc.followup_count, 0))::int as total_activity
+        FROM users u
+        LEFT JOIN (
+          SELECT created_by_id, COUNT(*) as note_count
+          FROM notes
+          WHERE created_at::date >= $1 AND created_at::date <= $2
+          GROUP BY created_by_id
+        ) nc ON nc.created_by_id = u.id
+        LEFT JOIN (
+          SELECT a.assigned_rep_id, COUNT(*) as followup_count
+          FROM accounts a
+          WHERE a.follow_up_date >= $1::date AND a.follow_up_date <= $2::date
+            AND a.deleted_at IS NULL
+          GROUP BY a.assigned_rep_id
+        ) fc ON fc.assigned_rep_id = u.id
+        WHERE u.is_active = true AND u.role = 'rep'
+        ORDER BY total_activity DESC, note_count DESC
+      `;
+      const ranking = await queryAll(rankingQuery, [startDate, endDate]);
+
+      // 2) If a specific rep is requested, get their notes grouped by account
+      let repNotes = [];
+      let repFollowUps = [];
+      if (repId) {
+        const notesQuery = `
+          SELECT n.id, n.content, n.created_at, n.is_voice_transcribed,
+            a.id as account_id, a.shop_name, a.city, a.account_category,
+            u.first_name as author_first, u.last_name as author_last, u.id as author_id,
+            (SELECT json_agg(json_build_object(
+              'id', r.id, 'content', r.content, 'created_at', r.created_at,
+              'author_first', ru.first_name, 'author_last', ru.last_name
+            ) ORDER BY r.created_at ASC)
+            FROM notes r
+            JOIN users ru ON ru.id = r.created_by_id
+            WHERE r.content LIKE '[Manager Reply to #' || n.id || ']%'
+            ) as replies
+          FROM notes n
+          JOIN accounts a ON a.id = n.account_id
+          JOIN users u ON u.id = n.created_by_id
+          WHERE n.created_by_id = $3
+            AND n.created_at::date >= $1 AND n.created_at::date <= $2
+            AND a.deleted_at IS NULL
+            AND n.content NOT LIKE '[Manager Reply to #%'
+          ORDER BY a.shop_name ASC, n.created_at DESC
+        `;
+        repNotes = await queryAll(notesQuery, [startDate, endDate, repId]);
+
+        const followUpQuery = `
+          SELECT a.id as account_id, a.shop_name, a.city, a.follow_up_date,
+            a.account_category, a.status,
+            (SELECT LEFT(n2.content, 200) FROM notes n2
+             WHERE n2.account_id = a.id
+             ORDER BY n2.created_at DESC LIMIT 1) as latest_note,
+            (SELECT json_agg(json_build_object(
+              'id', mr.id, 'content', mr.content, 'created_at', mr.created_at,
+              'author_first', mu.first_name, 'author_last', mu.last_name
+            ) ORDER BY mr.created_at ASC)
+            FROM notes mr
+            JOIN users mu ON mu.id = mr.created_by_id
+            WHERE mr.account_id = a.id
+              AND mr.content LIKE '[Manager Note]%'
+              AND mr.created_at::date >= $1
+            ) as manager_notes
+          FROM accounts a
+          WHERE a.assigned_rep_id = $3
+            AND a.follow_up_date >= $1::date AND a.follow_up_date <= $2::date
+            AND a.deleted_at IS NULL
+          ORDER BY a.follow_up_date ASC
+        `;
+        repFollowUps = await queryAll(followUpQuery, [startDate, endDate, repId]);
+      }
+
+      res.json({
+        period, startDate, endDate,
+        ranking: ranking.map((r, i) => ({ ...r, rank: i + 1 })),
+        repNotes,
+        repFollowUps
+      });
+    } catch (e) {
+      console.error('team-activity error:', e);
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // POST /api/admin/team-activity/reply — manager replies to a specific note
+  app.post('/api/admin/team-activity/reply', authenticate, async (req, res) => {
+    if (!canAccessActivityTracker(req, res)) return;
+    try {
+      const { note_id, account_id, content } = req.body;
+      if (!content || !content.trim()) return res.status(400).json({ error: 'Reply content required' });
+      if (!account_id) return res.status(400).json({ error: 'account_id required' });
+
+      const prefix = note_id ? `[Manager Reply to #${note_id}]` : '[Manager Note]';
+      const fullContent = `${prefix} ${content.trim()}`;
+
+      const result = await queryOne(
+        'INSERT INTO notes (account_id, created_by_id, content, is_voice_transcribed, created_at) VALUES ($1, $2, $3, false, NOW()) RETURNING id, created_at',
+        [account_id, req.user.userId, fullContent]
+      );
+      await logAudit(req, 'note', result.id, 'create', { type: 'manager_reply', original_note_id: note_id, account_id });
+
+      const author = await queryOne('SELECT first_name, last_name FROM users WHERE id=$1', [req.user.userId]);
+      res.json({
+        success: true,
+        reply: {
+          id: result.id,
+          content: fullContent,
+          created_at: result.created_at,
+          author_first: author?.first_name,
+          author_last: author?.last_name
+        }
+      });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
 // ============================================================================
 //  CHC CRM — Daily Report + Comments + Notifications
 //  PASTE THIS BLOCK INTO backend/server.js

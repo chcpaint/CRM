@@ -31,7 +31,7 @@ interface ManagedUser {
 
 export default function AdminPage({ user }: Props) {
   const [users, setUsers] = useState<ManagedUser[]>([]);
-  const [activeTab, setActiveTab] = useState<'users' | 'notifications' | 'data' | 'duplicates' | 'audit'>('users');
+  const [activeTab, setActiveTab] = useState<'users' | 'notifications' | 'data' | 'duplicates' | 'audit' | 'activity'>('users');
   const [showAddUser, setShowAddUser] = useState(false);
   const [newUser, setNewUser] = useState({ email: '', password: '', first_name: '', last_name: '', role: 'rep' });
   const [error, setError] = useState('');
@@ -126,6 +126,72 @@ export default function AdminPage({ user }: Props) {
     } catch (err: any) {
       showError(err.error || 'Dismiss failed');
     } finally { setDupeActionLoading(null); }
+  };
+
+  // ─── Team Activity Tracker state ───
+  interface ActivityRanking {
+    rep_id: number; first_name: string; last_name: string;
+    note_count: number; followup_count: number; total_activity: number; rank: number;
+  }
+  interface NoteReply { id: number; content: string; created_at: string; author_first: string; author_last: string; }
+  interface RepNote {
+    id: number; content: string; created_at: string; is_voice_transcribed: boolean;
+    account_id: number; shop_name: string; city: string | null; account_category: string;
+    author_first: string; author_last: string; author_id: number;
+    replies: NoteReply[] | null;
+  }
+  interface RepFollowUp {
+    account_id: number; shop_name: string; city: string | null; follow_up_date: string;
+    account_category: string; status: string; latest_note: string | null;
+    manager_notes: NoteReply[] | null;
+  }
+  const [activityPeriod, setActivityPeriod] = useState<string>('this_week');
+  const [activityMonth, setActivityMonth] = useState<string>(new Date().toISOString().slice(0, 7));
+  const [activityRepId, setActivityRepId] = useState<number | null>(null);
+  const [activityRanking, setActivityRanking] = useState<ActivityRanking[]>([]);
+  const [activityNotes, setActivityNotes] = useState<RepNote[]>([]);
+  const [activityFollowUps, setActivityFollowUps] = useState<RepFollowUp[]>([]);
+  const [activityLoading, setActivityLoading] = useState(false);
+  const [activityDateRange, setActivityDateRange] = useState<{ start: string; end: string } | null>(null);
+  const [replyingTo, setReplyingTo] = useState<{ noteId: number | null; accountId: number; type: 'note' | 'followup' } | null>(null);
+  const [replyText, setReplyText] = useState('');
+  const [replySending, setReplySending] = useState(false);
+
+  const loadActivityData = async (period?: string, repId?: number | null, month?: string) => {
+    setActivityLoading(true);
+    const p = period ?? activityPeriod;
+    const r = repId !== undefined ? repId : activityRepId;
+    const m = month ?? activityMonth;
+    try {
+      const params: Record<string, string> = { period: p };
+      if (r) params.rep_id = String(r);
+      if (p === 'month') params.month = m;
+      const data = await api.get('/admin/team-activity', params);
+      setActivityRanking(data.ranking || []);
+      setActivityNotes(data.repNotes || []);
+      setActivityFollowUps(data.repFollowUps || []);
+      setActivityDateRange(data.startDate && data.endDate ? { start: data.startDate, end: data.endDate } : null);
+    } catch (err) { console.error(err); }
+    finally { setActivityLoading(false); }
+  };
+
+  const sendReply = async () => {
+    if (!replyingTo || !replyText.trim()) return;
+    setReplySending(true);
+    try {
+      const data = await api.post('/admin/team-activity/reply', {
+        note_id: replyingTo.noteId,
+        account_id: replyingTo.accountId,
+        content: replyText.trim()
+      });
+      showSuccess('Reply posted');
+      setReplyingTo(null);
+      setReplyText('');
+      // Refresh to show the new reply
+      await loadActivityData();
+    } catch (err: any) {
+      showError(err.error || 'Failed to send reply');
+    } finally { setReplySending(false); }
   };
 
   // Google Drive auto-import state
@@ -351,6 +417,8 @@ export default function AdminPage({ user }: Props) {
 
   const isAdmin = user.role === 'admin';
   const isManagerOrAdmin = user.role === 'admin' || user.role === 'manager';
+  const ACTIVITY_TRACKER_IDS = [1, 4, 7, 18]; // Adam, Frank, Manny Pacheco, Pino
+  const canSeeActivityTracker = ACTIVITY_TRACKER_IDS.includes(user.id);
 
   return (
     <div>
@@ -376,6 +444,7 @@ export default function AdminPage({ user }: Props) {
           {[
             { key: 'users', label: 'Users', labelFull: 'User Management' },
             { key: 'notifications', label: 'Alerts', labelFull: 'Notifications' },
+            ...(canSeeActivityTracker ? [{ key: 'activity', label: 'Activity', labelFull: 'Team Activity Tracker' }] : []),
             ...(isAdmin ? [{ key: 'duplicates', label: 'Dupes', labelFull: 'Duplicate Cleanup' }] : []),
             ...(isAdmin ? [{ key: 'data', label: 'Data', labelFull: 'Data Management' }] : []),
             { key: 'audit', label: 'Audit', labelFull: 'Audit Log' }
@@ -387,6 +456,7 @@ export default function AdminPage({ user }: Props) {
                 if (tab.key === 'notifications') loadNotificationSettings();
                 if (tab.key === 'duplicates') loadDuplicates();
                 if (tab.key === 'data') { loadGDriveStatus(); loadImportHistory(); }
+                if (tab.key === 'activity') loadActivityData();
               }}
               className={`px-3 sm:px-4 py-2 rounded-lg text-xs sm:text-sm font-medium transition-colors whitespace-nowrap ${
                 activeTab === tab.key ? 'bg-white text-navy-900 shadow-sm' : 'text-navy-500 hover:text-navy-700'
@@ -942,6 +1012,296 @@ export default function AdminPage({ user }: Props) {
               </div>
             )}
           </div>
+        </div>
+      )}
+
+      {/* ═══ TEAM ACTIVITY TRACKER TAB ═══ */}
+      {activeTab === 'activity' && canSeeActivityTracker && (
+        <div className="space-y-6">
+          {/* Period selector */}
+          <div className="card">
+            <h2 className="font-bold text-navy-900 mb-3">Team Activity Tracker</h2>
+            <div className="flex flex-wrap items-center gap-3">
+              <div>
+                <label className="text-xs text-navy-500 block mb-1">Time Period</label>
+                <select
+                  className="input-field text-sm"
+                  value={activityPeriod}
+                  onChange={e => {
+                    setActivityPeriod(e.target.value);
+                    loadActivityData(e.target.value, activityRepId);
+                  }}
+                >
+                  <option value="today">Today</option>
+                  <option value="this_week">This Week</option>
+                  <option value="prior_week">Prior Week</option>
+                  <option value="month">Monthly</option>
+                </select>
+              </div>
+              {activityPeriod === 'month' && (
+                <div>
+                  <label className="text-xs text-navy-500 block mb-1">Month</label>
+                  <input
+                    type="month"
+                    className="input-field text-sm"
+                    value={activityMonth}
+                    onChange={e => {
+                      setActivityMonth(e.target.value);
+                      loadActivityData('month', activityRepId, e.target.value);
+                    }}
+                  />
+                </div>
+              )}
+              {activityDateRange && (
+                <div className="text-xs text-navy-400 self-end pb-2">
+                  {activityDateRange.start} → {activityDateRange.end}
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Team Ranking Leaderboard */}
+          <div className="card">
+            <h2 className="font-bold text-navy-900 mb-3">Team Rankings</h2>
+            {activityLoading && !activityRanking.length ? (
+              <div className="text-sm text-navy-400 py-4">Loading...</div>
+            ) : activityRanking.length === 0 ? (
+              <div className="text-sm text-navy-400 py-4">No activity data for this period.</div>
+            ) : (
+              <div className="space-y-2">
+                {activityRanking.map(r => {
+                  const maxActivity = activityRanking[0]?.total_activity || 1;
+                  const barWidth = maxActivity > 0 ? Math.max(4, (r.total_activity / maxActivity) * 100) : 4;
+                  const isSelected = activityRepId === r.rep_id;
+                  return (
+                    <button
+                      key={r.rep_id}
+                      onClick={() => {
+                        const newRepId = isSelected ? null : r.rep_id;
+                        setActivityRepId(newRepId);
+                        loadActivityData(undefined, newRepId);
+                      }}
+                      className={`w-full text-left rounded-lg p-3 border transition-all ${
+                        isSelected
+                          ? 'border-brand-500 bg-brand-50 shadow-sm'
+                          : 'border-navy-100 hover:border-navy-200 hover:bg-navy-50'
+                      }`}
+                    >
+                      <div className="flex items-center gap-3">
+                        <div className={`w-8 h-8 rounded-full flex items-center justify-center text-sm font-bold ${
+                          r.rank === 1 ? 'bg-yellow-100 text-yellow-700' :
+                          r.rank === 2 ? 'bg-gray-100 text-gray-600' :
+                          r.rank === 3 ? 'bg-orange-100 text-orange-700' :
+                          'bg-navy-100 text-navy-500'
+                        }`}>
+                          {r.rank}
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-baseline justify-between">
+                            <span className="font-semibold text-navy-900 text-sm">{r.first_name} {r.last_name}</span>
+                            <span className="text-xs font-bold text-navy-700 ml-2">{r.total_activity}</span>
+                          </div>
+                          <div className="flex items-center gap-3 mt-1">
+                            <div className="flex-1 bg-navy-100 rounded-full h-2 overflow-hidden">
+                              <div className="h-full rounded-full bg-brand-500 transition-all" style={{ width: `${barWidth}%` }} />
+                            </div>
+                            <div className="flex gap-2 text-[10px] text-navy-400 whitespace-nowrap">
+                              <span>{r.note_count} notes</span>
+                              <span>{r.followup_count} follow-ups</span>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+
+          {/* Rep Detail — Notes by Client */}
+          {activityRepId && (
+            <div className="space-y-6">
+              {/* Notes grouped by client */}
+              <div className="card">
+                <h2 className="font-bold text-navy-900 mb-1">
+                  Notes by Client — {activityRanking.find(r => r.rep_id === activityRepId)?.first_name || 'Rep'}
+                </h2>
+                <p className="text-xs text-navy-400 mb-4">{activityNotes.length} note(s) in this period</p>
+
+                {activityNotes.length === 0 ? (
+                  <div className="text-sm text-navy-400 py-4">No notes for this period.</div>
+                ) : (
+                  <div className="space-y-4">
+                    {/* Group notes by account */}
+                    {Object.entries(
+                      activityNotes.reduce((groups: Record<number, RepNote[]>, note) => {
+                        (groups[note.account_id] = groups[note.account_id] || []).push(note);
+                        return groups;
+                      }, {})
+                    ).map(([accountId, notes]) => {
+                      const first = notes[0];
+                      return (
+                        <div key={accountId} className="border border-navy-100 rounded-xl overflow-hidden">
+                          <div className="bg-navy-50 px-4 py-2 flex items-center justify-between">
+                            <div>
+                              <a href={`/accounts/${accountId}`} target="_blank" rel="noreferrer"
+                                className="font-semibold text-navy-900 text-sm hover:text-brand-600 hover:underline">
+                                {first.shop_name}
+                              </a>
+                              {first.city && <span className="text-xs text-navy-400 ml-2">{first.city}</span>}
+                            </div>
+                            <span className={`text-[10px] font-semibold px-2 py-0.5 rounded ${
+                              first.account_category === 'customer' ? 'bg-green-100 text-green-700' : 'bg-blue-100 text-blue-700'
+                            }`}>
+                              {first.account_category === 'customer' ? 'Customer' : 'Lead'}
+                            </span>
+                          </div>
+                          <div className="divide-y divide-navy-50">
+                            {notes.map(note => (
+                              <div key={note.id} className="px-4 py-3">
+                                <div className="flex items-start justify-between gap-2">
+                                  <p className="text-sm text-navy-800 whitespace-pre-wrap flex-1">{note.content}</p>
+                                  <span className="text-[10px] text-navy-300 whitespace-nowrap">
+                                    {new Date(note.created_at).toLocaleDateString('en-CA', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
+                                  </span>
+                                </div>
+                                {note.is_voice_transcribed && (
+                                  <span className="inline-block text-[9px] bg-purple-100 text-purple-600 rounded px-1 mt-1">voice</span>
+                                )}
+                                {/* Existing replies */}
+                                {note.replies && note.replies.length > 0 && (
+                                  <div className="mt-2 pl-3 border-l-2 border-brand-200 space-y-2">
+                                    {note.replies.map(reply => (
+                                      <div key={reply.id} className="text-xs">
+                                        <span className="font-semibold text-brand-700">{reply.author_first} {reply.author_last}</span>
+                                        <span className="text-navy-300 ml-2">
+                                          {new Date(reply.created_at).toLocaleDateString('en-CA', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
+                                        </span>
+                                        <p className="text-navy-700 mt-0.5">{reply.content.replace(/^\[Manager Reply to #\d+\]\s*/, '')}</p>
+                                      </div>
+                                    ))}
+                                  </div>
+                                )}
+                                {/* Reply button / form */}
+                                {replyingTo?.noteId === note.id && replyingTo?.type === 'note' ? (
+                                  <div className="mt-2 flex gap-2">
+                                    <input
+                                      type="text"
+                                      className="input-field text-sm flex-1"
+                                      placeholder="Type your reply..."
+                                      value={replyText}
+                                      onChange={e => setReplyText(e.target.value)}
+                                      onKeyDown={e => e.key === 'Enter' && sendReply()}
+                                      autoFocus
+                                    />
+                                    <button onClick={sendReply} disabled={replySending || !replyText.trim()} className="btn-primary text-xs px-3">
+                                      {replySending ? '...' : 'Send'}
+                                    </button>
+                                    <button onClick={() => { setReplyingTo(null); setReplyText(''); }} className="text-xs text-navy-400 hover:text-navy-600">Cancel</button>
+                                  </div>
+                                ) : (
+                                  <button
+                                    onClick={() => setReplyingTo({ noteId: note.id, accountId: note.account_id, type: 'note' })}
+                                    className="text-[11px] text-brand-600 hover:text-brand-800 mt-1"
+                                  >
+                                    Reply
+                                  </button>
+                                )}
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+
+              {/* Follow-ups / Visit Bookings */}
+              <div className="card">
+                <h2 className="font-bold text-navy-900 mb-1">
+                  Follow-Ups &amp; Visits — {activityRanking.find(r => r.rep_id === activityRepId)?.first_name || 'Rep'}
+                </h2>
+                <p className="text-xs text-navy-400 mb-4">{activityFollowUps.length} scheduled in this period</p>
+
+                {activityFollowUps.length === 0 ? (
+                  <div className="text-sm text-navy-400 py-4">No follow-ups scheduled for this period.</div>
+                ) : (
+                  <div className="space-y-3">
+                    {activityFollowUps.map(fu => (
+                      <div key={fu.account_id} className="border border-navy-100 rounded-xl p-4">
+                        <div className="flex items-start justify-between">
+                          <div>
+                            <a href={`/accounts/${fu.account_id}`} target="_blank" rel="noreferrer"
+                              className="font-semibold text-navy-900 text-sm hover:text-brand-600 hover:underline">
+                              {fu.shop_name}
+                            </a>
+                            {fu.city && <span className="text-xs text-navy-400 ml-2">{fu.city}</span>}
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <span className={`text-[10px] font-semibold px-2 py-0.5 rounded ${
+                              fu.account_category === 'customer' ? 'bg-green-100 text-green-700' : 'bg-blue-100 text-blue-700'
+                            }`}>
+                              {fu.account_category === 'customer' ? 'Customer' : 'Lead'}
+                            </span>
+                            <span className={`text-xs font-medium px-2 py-0.5 rounded ${
+                              new Date(fu.follow_up_date) < new Date(new Date().toISOString().slice(0, 10))
+                                ? 'bg-red-100 text-red-700' : 'bg-brand-100 text-brand-700'
+                            }`}>
+                              {new Date(fu.follow_up_date + 'T12:00:00').toLocaleDateString('en-CA', { weekday: 'short', month: 'short', day: 'numeric' })}
+                            </span>
+                          </div>
+                        </div>
+                        {fu.latest_note && (
+                          <p className="text-xs text-navy-500 mt-2 line-clamp-2">{fu.latest_note}</p>
+                        )}
+                        {/* Manager notes on this follow-up */}
+                        {fu.manager_notes && fu.manager_notes.length > 0 && (
+                          <div className="mt-2 pl-3 border-l-2 border-brand-200 space-y-1">
+                            {fu.manager_notes.map(mn => (
+                              <div key={mn.id} className="text-xs">
+                                <span className="font-semibold text-brand-700">{mn.author_first} {mn.author_last}</span>
+                                <span className="text-navy-300 ml-2">
+                                  {new Date(mn.created_at).toLocaleDateString('en-CA', { month: 'short', day: 'numeric' })}
+                                </span>
+                                <p className="text-navy-700 mt-0.5">{mn.content.replace(/^\[Manager Note\]\s*/, '')}</p>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                        {/* Add manager note to follow-up */}
+                        {replyingTo?.accountId === fu.account_id && replyingTo?.type === 'followup' ? (
+                          <div className="mt-2 flex gap-2">
+                            <input
+                              type="text"
+                              className="input-field text-sm flex-1"
+                              placeholder="Add a note for the rep..."
+                              value={replyText}
+                              onChange={e => setReplyText(e.target.value)}
+                              onKeyDown={e => e.key === 'Enter' && sendReply()}
+                              autoFocus
+                            />
+                            <button onClick={sendReply} disabled={replySending || !replyText.trim()} className="btn-primary text-xs px-3">
+                              {replySending ? '...' : 'Send'}
+                            </button>
+                            <button onClick={() => { setReplyingTo(null); setReplyText(''); }} className="text-xs text-navy-400 hover:text-navy-600">Cancel</button>
+                          </div>
+                        ) : (
+                          <button
+                            onClick={() => setReplyingTo({ noteId: null, accountId: fu.account_id, type: 'followup' })}
+                            className="text-[11px] text-brand-600 hover:text-brand-800 mt-2"
+                          >
+                            Add Note
+                          </button>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
         </div>
       )}
 

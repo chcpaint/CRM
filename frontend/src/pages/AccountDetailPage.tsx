@@ -78,6 +78,8 @@ export default function AccountDetailPage({ user }: Props) {
 
   // PCR guard modal
   const [pcrWarning, setPcrWarning] = useState<string | null>(null);
+  // Save error feedback
+  const [saveError, setSaveError] = useState<string | null>(null);
   // Note transfer
   const [activeMatch, setActiveMatch] = useState<{id: number; shop_name: string; branch: string | null; pcr_managed: boolean} | null>(null);
   const [transferring, setTransferring] = useState(false);
@@ -347,6 +349,7 @@ export default function AccountDetailPage({ user }: Props) {
   };
 
   const saveEdit = async () => {
+    setSaveError(null);
     try {
       await api.put(`/accounts/${id}`, {
         ...editForm,
@@ -355,6 +358,7 @@ export default function AccountDetailPage({ user }: Props) {
       });
       setEditing(false);
       setPcrWarning(null);
+      setSaveError(null);
       loadAccount();
     } catch (err: any) {
       // Check for PCR guard error
@@ -364,7 +368,18 @@ export default function AccountDetailPage({ user }: Props) {
         // Reset status back so user isn't stuck
         setEditForm(f => ({...f, status: account?.status, account_category: account?.account_category}));
       } else {
-        console.error(err);
+        // Show a user-visible error message
+        const details = err?.details;
+        let msg = 'Could not save changes. Please try again.';
+        if (details && Array.isArray(details)) {
+          msg = 'Save failed: ' + details.map((d: any) => `${d.path}: ${d.message}`).join(', ');
+        } else if (err?.message) {
+          msg = `Save failed: ${err.message}`;
+        } else if (err?.error && typeof err.error === 'string') {
+          msg = `Save failed: ${err.error}`;
+        }
+        setSaveError(msg);
+        console.error('Save error:', err);
       }
     }
   };
@@ -701,6 +716,15 @@ export default function AccountDetailPage({ user }: Props) {
               )}
             </div>
 
+            {saveError && (
+              <div className="bg-red-50 border border-red-200 rounded-lg p-3 flex items-start gap-2">
+                <span className="text-red-500 text-lg leading-none">⚠</span>
+                <div className="flex-1">
+                  <p className="text-red-700 text-sm font-medium">{saveError}</p>
+                </div>
+                <button onClick={() => setSaveError(null)} className="text-red-400 hover:text-red-600">&times;</button>
+              </div>
+            )}
             <div>
               <button onClick={saveEdit} className="btn-primary w-full sm:w-auto">Save Changes</button>
             </div>

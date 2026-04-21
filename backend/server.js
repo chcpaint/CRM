@@ -33,7 +33,9 @@ const accountUpdateSchema = z.object({
   contact_names: shortStr(500).nullable().optional(),
   phone: shortStr(50).nullable().optional(),
   phone2: shortStr(50).nullable().optional(),
-  email: z.union([emailStr, z.literal(''), z.null()]).optional(),
+  // email is a legacy field auto-derived from email_addresses on save;
+  // many existing records hold comma-separated lists, so we accept any string here.
+  email: z.union([z.string().trim().max(500), z.literal(''), z.null()]).optional(),
   account_type: z.enum(['collision', 'mechanical', 'dealership', 'restoration', 'other']).optional(),
   assigned_rep_id: intOrNull,
   secondary_rep_id: intOrNull,

@@ -27,6 +27,14 @@ export default function App() {
     if (savedUser && savedToken) {
       setUser(JSON.parse(savedUser));
       api.setToken(savedToken);
+      // Refresh user profile from server so role changes take effect immediately
+      api.get('/auth/me').then((data: any) => {
+        if (data.user) {
+          const refreshed = { ...JSON.parse(savedUser), ...data.user };
+          localStorage.setItem('user', JSON.stringify(refreshed));
+          setUser(refreshed);
+        }
+      }).catch(() => { /* token expired — handled by api interceptor */ });
     }
     setLoading(false);
   }, []);

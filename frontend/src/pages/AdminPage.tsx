@@ -121,6 +121,7 @@ export default function AdminPage({ user }: Props) {
     setDupeActionLoading(flagId);
     try {
       await api.post(`/admin/duplicates/${flagId}/dismiss`);
+      showSuccess('Dismissed — marked as not a duplicate.');
       await loadDuplicates();
     } catch (err: any) {
       showError(err.error || 'Dismiss failed');

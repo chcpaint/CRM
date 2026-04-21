@@ -87,14 +87,24 @@ function generateToken(payload) {
   return jwt.sign(payload, JWT_SECRET, { expiresIn: '24h' });
 }
 
-function authenticate(req, res, next) {
+async function authenticate(req, res, next) {
   const authHeader = req.headers.authorization;
   const token = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : req.cookies?.token;
   if (!token) return res.status(401).json({ error: 'Authentication required' });
   try {
-    req.user = jwt.verify(token, JWT_SECRET);
+    const decoded = jwt.verify(token, JWT_SECRET);
+    // Always fetch the current role from the DB so role changes take effect immediately
+    // (the JWT may contain a stale role from login time)
+    const freshUser = await queryOne('SELECT role FROM users WHERE id=$1 AND is_active=true', [decoded.userId]);
+    if (!freshUser) return res.status(401).json({ error: 'User not found or deactivated' });
+    req.user = { ...decoded, role: freshUser.role };
     next();
-  } catch { return res.status(401).json({ error: 'Invalid or expired token' }); }
+  } catch (err) {
+    if (err.name === 'JsonWebTokenError' || err.name === 'TokenExpiredError') {
+      return res.status(401).json({ error: 'Invalid or expired token' });
+    }
+    return res.status(500).json({ error: 'Authentication error' });
+  }
 }
 
 async function logAudit(req, entityType, entityId, action, changes = {}) {

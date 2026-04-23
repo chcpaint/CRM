@@ -3,7 +3,7 @@ services:
     name: chc-crm
     runtime: docker
     dockerfilePath: ./Dockerfile
-    repo: https://github.com/Easeaiworks/REFINISH-AI-CRM.git
+    repo: https://github.com/chcpaint/CRM.git
     branch: main
     plan: free
     envVars:

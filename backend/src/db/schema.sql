@@ -26,7 +26,7 @@ CREATE TABLE IF NOT EXISTS accounts (
   email TEXT,
   account_type TEXT DEFAULT 'collision',
   assigned_rep_id INTEGER REFERENCES users(id),
-  status TEXT NOT NULL DEFAULT 'prospect' CHECK(status IN ('prospect', 'active', 'cold', 'dnc', 'churned')),
+  status TEXT NOT NULL DEFAULT 'prospect' CHECK(status IN ('prospect', 'active', 'cold', 'dnc', 'churned', 'on_hold')),
   suppliers TEXT,
   paint_line TEXT,
   allied_products TEXT,
@@ -65,6 +65,14 @@ CREATE TABLE IF NOT EXISTS activities (
   completed_date TIMESTAMPTZ,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- Widen status constraint to include on_hold
+ALTER TABLE accounts DROP CONSTRAINT IF EXISTS accounts_status_check;
+DO $$ BEGIN
+  ALTER TABLE accounts ADD CONSTRAINT accounts_status_check
+    CHECK(status IN ('prospect', 'active', 'cold', 'dnc', 'churned', 'on_hold'));
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
 
 -- Widen activity_type constraint to support new tags
 ALTER TABLE activities DROP CONSTRAINT IF EXISTS activities_activity_type_check;
@@ -371,3 +379,56 @@ DO $$ BEGIN
 EXCEPTION WHEN duplicate_column THEN NULL;
 END $$;
 CREATE INDEX IF NOT EXISTS idx_cmi_manufacturer_lower ON competitive_market_info (LOWER(manufacturer));
+
+-- ─── HOLDS (synced from CHC Intranet) ──────────────────────────────
+CREATE TABLE IF NOT EXISTS holds (
+  id            SERIAL PRIMARY KEY,
+  intranet_id   TEXT UNIQUE,
+  customer_name TEXT NOT NULL,
+  branch        TEXT,
+  reason        TEXT,
+  added_at      TIMESTAMPTZ,
+  added_by      TEXT,
+  updates       JSONB DEFAULT '[]'::jsonb,
+  intranet_updated_at TIMESTAMPTZ,
+  account_id    INT REFERENCES accounts(id) ON DELETE SET NULL,
+  rep_id        INT REFERENCES users(id) ON DELETE SET NULL,
+  synced_at     TIMESTAMPTZ DEFAULT NOW(),
+  is_active     BOOLEAN DEFAULT true,
+  created_at    TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_holds_is_active ON holds(is_active);
+CREATE INDEX IF NOT EXISTS idx_holds_rep_id ON holds(rep_id);
+CREATE INDEX IF NOT EXISTS idx_holds_account_id ON holds(account_id);
+CREATE INDEX IF NOT EXISTS idx_holds_branch ON holds(branch);
+
+-- ─── NOTE COMMENTS (threaded coaching/replies) ────────────────────
+CREATE TABLE IF NOT EXISTS note_comments (
+  id                SERIAL PRIMARY KEY,
+  note_id           INT NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
+  author_id         INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  parent_comment_id INT REFERENCES note_comments(id) ON DELETE CASCADE,
+  body              TEXT NOT NULL,
+  created_at        TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_note_comments_note_id ON note_comments(note_id);
+CREATE INDEX IF NOT EXISTS idx_note_comments_author_id ON note_comments(author_id);
+
+-- ─── REFRESH HOLDS FUNCTION ────────────────────────────────────────
+-- Placeholder: returns summary. In production, populate holds via external sync
+-- or call this after an ETL job populates the holds table.
+CREATE OR REPLACE FUNCTION public.refresh_holds_from_intranet()
+RETURNS jsonb AS $$
+DECLARE
+  active_count int;
+  unassigned_count int;
+BEGIN
+  SELECT COUNT(*) INTO active_count FROM holds WHERE is_active = true;
+  SELECT COUNT(*) INTO unassigned_count FROM holds WHERE is_active = true AND rep_id IS NULL;
+  RETURN jsonb_build_object(
+    'active', active_count,
+    'unassigned', unassigned_count,
+    'refreshed_at', NOW()
+  );
+END;
+$$ LANGUAGE plpgsql;

@@ -175,15 +175,17 @@ router.get('/dashboard/metrics', authenticate, (req: AuthRequest, res: Response)
        JOIN users u ON act.rep_id = u.id
        ${repFilter ? 'WHERE act.rep_id = ?' : ''}
        ORDER BY act.created_at DESC
-       LIMIT 10`,
+       LIMIT 30`,
       repFilter ? [userId] : []
     );
 
-    // Dormant accounts count
+    // Dormant accounts count — ACTIVE accounts only, no note or activity in 30+ days.
+    // last_contacted_at is bumped whenever a note or activity is logged (see notes.ts, activities.ts),
+    // so "dormant" == no salesperson touch logged in the window.
     const dormantCount = queryOne<{ count: number }>(
       `SELECT COUNT(*) as count FROM accounts
-       WHERE deleted_at IS NULL AND status IN ('prospect', 'active')
-       AND (last_contacted_at IS NULL OR last_contacted_at < datetime('now', '-14 days'))
+       WHERE deleted_at IS NULL AND status = 'active'
+       AND (last_contacted_at IS NULL OR last_contacted_at < datetime('now', '-30 days'))
        ${repFilter ? 'AND assigned_rep_id = ?' : ''}`,
       repFilter ? [userId] : []
     );

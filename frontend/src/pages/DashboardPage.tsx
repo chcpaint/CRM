@@ -7,12 +7,52 @@ import MessagesForYouCard from '../components/notifications/MessagesForYouCard';
 
 interface Props { user: User }
 
+// Date-window preset options for the activity filters. 'priorWeek' = the most recent
+// complete Monday–Sunday, useful for weekly recap. 'all' keeps the full fetched window.
+type DateWindow = 'today' | 'last7' | 'priorWeek' | 'last30' | 'all';
+
+const DATE_WINDOWS: { value: DateWindow; label: string }[] = [
+  { value: 'today', label: 'Today' },
+  { value: 'last7', label: 'Last 7 days' },
+  { value: 'priorWeek', label: 'Prior week' },
+  { value: 'last30', label: 'Last 30 days' },
+  { value: 'all', label: 'All' },
+];
+
+function dateWindowRange(w: DateWindow): { start: number; end: number } {
+  const now = Date.now();
+  const day = 24 * 60 * 60 * 1000;
+  const today0 = new Date();
+  today0.setHours(0, 0, 0, 0);
+  switch (w) {
+    case 'today':
+      return { start: today0.getTime(), end: now };
+    case 'last7':
+      return { start: now - 7 * day, end: now };
+    case 'last30':
+      return { start: now - 30 * day, end: now };
+    case 'priorWeek': {
+      // Find this week's Monday 00:00, then go back 7 days for prior Monday.
+      const d = new Date(today0);
+      const dow = d.getDay(); // 0=Sun, 1=Mon, ... 6=Sat
+      const daysSinceMonday = (dow + 6) % 7; // 0 if today is Monday
+      d.setDate(d.getDate() - daysSinceMonday); // this Monday 00:00
+      const thisMon = d.getTime();
+      return { start: thisMon - 7 * day, end: thisMon - 1 };
+    }
+    case 'all':
+    default:
+      return { start: 0, end: Number.MAX_SAFE_INTEGER };
+  }
+}
+
 export default function DashboardPage({ user }: Props) {
   const [metrics, setMetrics] = useState<DashboardMetrics | null>(null);
   const [loading, setLoading] = useState(true);
   // Track which salesperson groups are expanded in the Recent Activity card.
   // Collapsed by default — users click a rep's row to see their entries.
   const [expandedReps, setExpandedReps] = useState<Set<string>>(new Set());
+  const [activityWindow, setActivityWindow] = useState<DateWindow>('last7');
   const toggleRep = (key: string) =>
     setExpandedReps((prev) => {
       const next = new Set(prev);
@@ -196,7 +236,7 @@ export default function DashboardPage({ user }: Props) {
           )}
         </div>
 
-        {/* Recent Activity — grouped by salesperson, collapsed by default */}
+        {/* Recent Activity — grouped by salesperson, date-windowed, collapsed by default */}
         <div className="card">
           <div className="flex items-baseline justify-between mb-2 gap-2">
             <h2 className="font-bold text-navy-900 text-sm sm:text-base">Recent Activity</h2>
@@ -204,13 +244,46 @@ export default function DashboardPage({ user }: Props) {
               <span className="text-[10px] sm:text-xs text-navy-400">Click to see activity</span>
             )}
           </div>
+          {/* Date window chips — filter both the grouping and the per-rep entries */}
+          <div className="flex flex-wrap gap-1 mb-3" role="group" aria-label="Activity date window">
+            {DATE_WINDOWS.map((w) => {
+              const active = activityWindow === w.value;
+              return (
+                <button
+                  key={w.value}
+                  type="button"
+                  onClick={() => setActivityWindow(w.value)}
+                  aria-pressed={active}
+                  className={`text-[10px] sm:text-xs px-2 py-1 rounded-full border transition-colors ${
+                    active
+                      ? 'bg-brand-600 border-brand-600 text-white'
+                      : 'bg-white border-navy-200 text-navy-600 hover:bg-navy-50'
+                  }`}
+                >
+                  {w.label}
+                </button>
+              );
+            })}
+          </div>
           {metrics.recentActivities.length > 0 ? (
             <div className="divide-y divide-navy-50">
               {(() => {
-                // Group entries by salesperson (first + last name, falling back to rep_id)
+                // Apply date window first, then group by salesperson.
                 type Entry = any;
+                const { start, end } = dateWindowRange(activityWindow);
+                const inWindow = (metrics.recentActivities as Entry[]).filter((a) => {
+                  const t = a.created_at ? new Date(a.created_at).getTime() : NaN;
+                  return Number.isFinite(t) && t >= start && t <= end;
+                });
+                if (inWindow.length === 0) {
+                  return (
+                    <p className="text-navy-400 text-sm py-6 text-center">
+                      No activity in this window. Try a longer range.
+                    </p>
+                  );
+                }
                 const groups = new Map<string, { label: string; entries: Entry[] }>();
-                for (const a of metrics.recentActivities as Entry[]) {
+                for (const a of inWindow) {
                   const fullName = `${a.first_name || ''} ${a.last_name || ''}`.trim() || 'Unassigned';
                   const key = String(a.rep_id ?? fullName);
                   if (!groups.has(key)) groups.set(key, { label: fullName, entries: [] });

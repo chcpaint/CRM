@@ -34,8 +34,19 @@ export default function DashboardPage({ user }: Props) {
 
   if (!metrics) return <div className="text-navy-500">Failed to load dashboard</div>;
 
-  const totalRevenue = metrics.monthlyRevenue.reduce((sum, m) => sum + (m.total || 0), 0);
+  const currentYear = new Date().getFullYear().toString();
+  // YTD = sum of months that fall in the current calendar year only (month format: "YYYY-MM")
+  const ytdRevenue = metrics.monthlyRevenue
+    .filter((m) => typeof m.month === 'string' && m.month.startsWith(currentYear))
+    .reduce((sum, m) => sum + (m.total || 0), 0);
   const currentMonth = metrics.monthlyRevenue[metrics.monthlyRevenue.length - 1];
+
+  // Show ACTIVE accounts on the KPI card (previously showed every row including cold / DNC / churned,
+  // which inflated the number past 1,800 and misrepresented the book of business).
+  const activeAccounts =
+    metrics.statusCounts.find((s) => s.status === 'active')?.count || 0;
+  // Keep the all-accounts total for pipeline percentage math so the bars still add up to 100%.
+  const pipelineTotal = metrics.totalAccounts;
 
   const fmtMoney = (n: number) => '$' + n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
@@ -59,8 +70,9 @@ export default function DashboardPage({ user }: Props) {
       {/* KPI Cards */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3 sm:gap-4 mb-6 sm:mb-8">
         <div className="card !p-4 sm:!p-6">
-          <div className="text-xs sm:text-sm text-navy-500 mb-1">Total Accounts</div>
-          <div className="text-xl sm:text-2xl font-bold text-navy-900">{metrics.totalAccounts}</div>
+          <div className="text-xs sm:text-sm text-navy-500 mb-1">Active Accounts</div>
+          <div className="text-xl sm:text-2xl font-bold text-navy-900">{activeAccounts}</div>
+          <div className="text-[10px] sm:text-xs text-navy-400 mt-1">Status = Active</div>
         </div>
         <div className="card !p-4 sm:!p-6">
           <div className="text-xs sm:text-sm text-navy-500 mb-1">Needs Follow-Up</div>
@@ -74,10 +86,11 @@ export default function DashboardPage({ user }: Props) {
           </div>
         </div>
         <div className="card !p-4 sm:!p-6">
-          <div className="text-xs sm:text-sm text-navy-500 mb-1">Total Revenue</div>
+          <div className="text-xs sm:text-sm text-navy-500 mb-1">YTD Sales</div>
           <div className="text-lg sm:text-2xl font-bold text-navy-900">
-            {fmtMoney(totalRevenue)}
+            {fmtMoney(ytdRevenue)}
           </div>
+          <div className="text-[10px] sm:text-xs text-navy-400 mt-1">Jan 1 {currentYear} – today</div>
         </div>
       </div>
 
@@ -89,7 +102,7 @@ export default function DashboardPage({ user }: Props) {
           <div className="space-y-3">
             {metrics.statusCounts.map((sc) => {
               const status = sc.status as keyof typeof STATUS_LABELS;
-              const percentage = metrics.totalAccounts > 0 ? (sc.count / metrics.totalAccounts) * 100 : 0;
+              const percentage = pipelineTotal > 0 ? (sc.count / pipelineTotal) * 100 : 0;
               return (
                 <div key={sc.status}>
                   <div className="flex justify-between text-xs sm:text-sm mb-1">

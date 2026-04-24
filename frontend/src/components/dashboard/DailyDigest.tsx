@@ -44,6 +44,44 @@ interface Props {
   alwaysShow?: boolean;
 }
 
+// Date-window presets for the Team Notes section of the daily report.
+// Mirrors the chip row on the dashboard's Recent Activity card so the UX is consistent.
+type DateWindow = 'today' | 'last7' | 'priorWeek' | 'last30' | 'all';
+
+const NOTE_WINDOWS: { value: DateWindow; label: string }[] = [
+  { value: 'today', label: 'Today' },
+  { value: 'last7', label: 'Last 7 days' },
+  { value: 'priorWeek', label: 'Prior week' },
+  { value: 'last30', label: 'Last 30 days' },
+  { value: 'all', label: 'All' },
+];
+
+function noteWindowRange(w: DateWindow): { start: number; end: number } {
+  const now = Date.now();
+  const day = 24 * 60 * 60 * 1000;
+  const today0 = new Date();
+  today0.setHours(0, 0, 0, 0);
+  switch (w) {
+    case 'today':
+      return { start: today0.getTime(), end: now };
+    case 'last7':
+      return { start: now - 7 * day, end: now };
+    case 'last30':
+      return { start: now - 30 * day, end: now };
+    case 'priorWeek': {
+      const d = new Date(today0);
+      const dow = d.getDay();
+      const daysSinceMonday = (dow + 6) % 7;
+      d.setDate(d.getDate() - daysSinceMonday);
+      const thisMon = d.getTime();
+      return { start: thisMon - 7 * day, end: thisMon - 1 };
+    }
+    case 'all':
+    default:
+      return { start: 0, end: Number.MAX_SAFE_INTEGER };
+  }
+}
+
 function cleanNote(note: string | null): string {
   if (!note) return '';
   return note.replace(/^\[Follow-up[^\]]*\]\s*/, '');
@@ -63,6 +101,8 @@ export default function DailyDigest({ user, alwaysShow = false }: Props) {
 
   const isManager = user.role === 'admin' || user.role === 'manager';
   const [exporting, setExporting] = useState(false);
+  // Date window for the Team Notes section — server now returns up to 30 days of notes.
+  const [notesWindow, setNotesWindow] = useState<DateWindow>('last7');
 
   useEffect(() => {
     loadDigest();
@@ -285,19 +325,55 @@ export default function DailyDigest({ user, alwaysShow = false }: Props) {
             </div>
           )}
 
-          {/* New notes from team */}
-          {digest.newNotes.length > 0 && (
-            <div>
-              <h3 className="text-xs font-bold text-navy-500 uppercase tracking-wide mb-2">Team Notes (Last 24h)</h3>
-              <div className="space-y-1.5">
-                {digest.newNotes.map(n => (
-                  <div key={n.id} className="text-xs text-navy-600 py-1 px-2">
-                    <span className="font-medium">{n.author}</span> on <span className="font-medium">{n.shop_name}</span>: {n.content}
+          {/* New notes from team — date-windowed */}
+          {digest.newNotes.length > 0 && (() => {
+            const { start, end } = noteWindowRange(notesWindow);
+            const visibleNotes = digest.newNotes.filter((n) => {
+              const t = n.created_at ? new Date(n.created_at).getTime() : NaN;
+              return Number.isFinite(t) && t >= start && t <= end;
+            });
+            return (
+              <div>
+                <div className="flex items-baseline justify-between mb-2 gap-2 flex-wrap">
+                  <h3 className="text-xs font-bold text-navy-500 uppercase tracking-wide">Team Notes</h3>
+                  <span className="text-[10px] text-navy-400">
+                    {visibleNotes.length} of {digest.newNotes.length} in window
+                  </span>
+                </div>
+                <div className="flex flex-wrap gap-1 mb-2" role="group" aria-label="Team notes date window">
+                  {NOTE_WINDOWS.map((w) => {
+                    const active = notesWindow === w.value;
+                    return (
+                      <button
+                        key={w.value}
+                        type="button"
+                        onClick={() => setNotesWindow(w.value)}
+                        aria-pressed={active}
+                        className={`text-[10px] px-2 py-0.5 rounded-full border transition-colors ${
+                          active
+                            ? 'bg-brand-600 border-brand-600 text-white'
+                            : 'bg-white border-navy-200 text-navy-600 hover:bg-navy-50'
+                        }`}
+                      >
+                        {w.label}
+                      </button>
+                    );
+                  })}
+                </div>
+                {visibleNotes.length > 0 ? (
+                  <div className="space-y-1.5">
+                    {visibleNotes.map((n) => (
+                      <div key={n.id} className="text-xs text-navy-600 py-1 px-2">
+                        <span className="font-medium">{n.author}</span> on <span className="font-medium">{n.shop_name}</span>: {n.content}
+                      </div>
+                    ))}
                   </div>
-                ))}
+                ) : (
+                  <p className="text-xs text-navy-400 py-2 px-2">No notes in this window.</p>
+                )}
               </div>
-            </div>
-          )}
+            );
+          })()}
 
           {/* Nothing to show */}
           {totalItems === 0 && digest.dormantAccounts.length === 0 && digest.newNotes.length === 0 && (

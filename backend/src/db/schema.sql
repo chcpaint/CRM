@@ -315,6 +315,29 @@ CREATE INDEX IF NOT EXISTS idx_accounts_branch ON accounts(branch);
 CREATE INDEX IF NOT EXISTS idx_accounts_secondary_rep ON accounts(secondary_rep_id);
 CREATE INDEX IF NOT EXISTS idx_accounts_pcr_managed ON accounts(pcr_managed) WHERE pcr_managed = true;
 
+-- ─── ACCOUNT IMPORT EXCLUSION ──────────────────────────────────────
+-- Set when a manager archives a shop from the No Activity report. The account and
+-- its history stay fully browsable in the CRM; the flag tells the AccountEdge / PCR
+-- match logic to skip this row so a re-emerging shop comes in as a fresh card rather
+-- than attaching new sales to a known-defunct record.
+DO $$ BEGIN
+  ALTER TABLE accounts ADD COLUMN excluded_from_import BOOLEAN DEFAULT false;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+DO $$ BEGIN
+  ALTER TABLE accounts ADD COLUMN excluded_at TIMESTAMPTZ;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+DO $$ BEGIN
+  ALTER TABLE accounts ADD COLUMN excluded_by_user_id INTEGER REFERENCES users(id);
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+DO $$ BEGIN
+  ALTER TABLE accounts ADD COLUMN exclusion_reason TEXT;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+CREATE INDEX IF NOT EXISTS idx_accounts_excluded_from_import ON accounts(excluded_from_import) WHERE excluded_from_import = true;
+
 -- ─── AUDIT LOG APPEND-ONLY PROTECTION ───────────────────────────────
 -- The audit_log is forensic evidence; reject any UPDATE or DELETE attempts
 -- at the database level so even a compromised backend cannot alter history.

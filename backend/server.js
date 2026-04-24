@@ -1115,7 +1115,7 @@ async function startServer() {
                JOIN accounts a ON n.account_id=a.id
                JOIN users u ON n.created_by_id=u.id
               WHERE n.created_by_id=$1)
-             ORDER BY created_at DESC LIMIT 15`
+             ORDER BY created_at DESC LIMIT 100`
           : `(SELECT act.id, act.account_id, 'activity' AS entry_type, act.activity_type, act.description, act.created_at,
                     a.shop_name, u.first_name, u.last_name
                FROM activities act
@@ -1127,13 +1127,13 @@ async function startServer() {
                FROM notes n
                JOIN accounts a ON n.account_id=a.id
                JOIN users u ON n.created_by_id=u.id)
-             ORDER BY created_at DESC LIMIT 15`,
+             ORDER BY created_at DESC LIMIT 100`,
         isRep ? [uid] : []);
 
       const dormantCount = await queryOne(
         isRep
-          ? "SELECT COUNT(*) as count FROM accounts WHERE deleted_at IS NULL AND status IN ('prospect','active') AND (last_contacted_at IS NULL OR last_contacted_at < NOW() - INTERVAL '14 days') AND assigned_rep_id = $1"
-          : "SELECT COUNT(*) as count FROM accounts WHERE deleted_at IS NULL AND status IN ('prospect','active') AND (last_contacted_at IS NULL OR last_contacted_at < NOW() - INTERVAL '14 days')",
+          ? "SELECT COUNT(*) as count FROM accounts WHERE deleted_at IS NULL AND status = 'active' AND (last_contacted_at IS NULL OR last_contacted_at < NOW() - INTERVAL '30 days') AND assigned_rep_id = $1"
+          : "SELECT COUNT(*) as count FROM accounts WHERE deleted_at IS NULL AND status = 'active' AND (last_contacted_at IS NULL OR last_contacted_at < NOW() - INTERVAL '30 days')",
         isRep ? [uid] : []);
 
       res.json({
@@ -1289,13 +1289,13 @@ async function startServer() {
 
     // Get dormant accounts (no contact in 14+ days)
     const dormantAccounts = await queryAll(
-      "SELECT a.* FROM accounts a WHERE a.deleted_at IS NULL AND a.assigned_rep_id = $1 AND a.status IN ('prospect', 'active') AND (a.last_contacted_at IS NULL OR a.last_contacted_at < NOW() - INTERVAL '14 days') ORDER BY a.last_contacted_at ASC NULLS FIRST LIMIT 10",
+      "SELECT a.* FROM accounts a WHERE a.deleted_at IS NULL AND a.assigned_rep_id = $1 AND a.status = 'active' AND (a.last_contacted_at IS NULL OR a.last_contacted_at < NOW() - INTERVAL '30 days') ORDER BY a.last_contacted_at ASC NULLS FIRST LIMIT 10",
       [userId]
     );
 
     // Get new notes from other team members in last 24 hours
     const newNotes = await queryAll(
-      'SELECT n.*, a.shop_name, u.first_name, u.last_name FROM notes n JOIN accounts a ON n.account_id = a.id JOIN users u ON n.created_by_id = u.id WHERE a.assigned_rep_id = $1 AND n.created_by_id != $1 AND n.created_at > NOW() - INTERVAL \'24 hours\' ORDER BY n.created_at DESC',
+      'SELECT n.*, a.shop_name, u.first_name, u.last_name FROM notes n JOIN accounts a ON n.account_id = a.id JOIN users u ON n.created_by_id = u.id WHERE a.assigned_rep_id = $1 AND n.created_by_id != $1 AND n.created_at > NOW() - INTERVAL \'30 days\' ORDER BY n.created_at DESC LIMIT 100',
       [userId]
     );
 

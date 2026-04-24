@@ -10,6 +10,16 @@ interface Props { user: User }
 export default function DashboardPage({ user }: Props) {
   const [metrics, setMetrics] = useState<DashboardMetrics | null>(null);
   const [loading, setLoading] = useState(true);
+  // Track which salesperson groups are expanded in the Recent Activity card.
+  // Collapsed by default — users click a rep's row to see their entries.
+  const [expandedReps, setExpandedReps] = useState<Set<string>>(new Set());
+  const toggleRep = (key: string) =>
+    setExpandedReps((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
 
   useEffect(() => {
     loadMetrics();
@@ -75,9 +85,9 @@ export default function DashboardPage({ user }: Props) {
           <div className="text-[10px] sm:text-xs text-navy-400 mt-1">Status = Active</div>
         </div>
         <div className="card !p-4 sm:!p-6">
-          <div className="text-xs sm:text-sm text-navy-500 mb-1">Needs Follow-Up</div>
+          <div className="text-xs sm:text-sm text-navy-500 mb-1">No Activity for 30 days</div>
           <div className="text-xl sm:text-2xl font-bold text-brand-600">{metrics.dormantCount}</div>
-          <div className="text-[10px] sm:text-xs text-navy-400 mt-1">No contact in 14+ days</div>
+          <div className="text-[10px] sm:text-xs text-navy-400 mt-1">Active accounts with no note or activity in 30+ days</div>
         </div>
         <div className="card !p-4 sm:!p-6">
           <div className="text-xs sm:text-sm text-navy-500 mb-1">This Month</div>
@@ -186,47 +196,105 @@ export default function DashboardPage({ user }: Props) {
           )}
         </div>
 
-        {/* Recent Activity */}
+        {/* Recent Activity — grouped by salesperson, collapsed by default */}
         <div className="card">
-          <h2 className="font-bold text-navy-900 mb-4 text-sm sm:text-base">Recent Activity</h2>
+          <div className="flex items-baseline justify-between mb-2 gap-2">
+            <h2 className="font-bold text-navy-900 text-sm sm:text-base">Recent Activity</h2>
+            {metrics.recentActivities.length > 0 && (
+              <span className="text-[10px] sm:text-xs text-navy-400">Click to see activity</span>
+            )}
+          </div>
           {metrics.recentActivities.length > 0 ? (
-            <div className="space-y-2 sm:space-y-3">
-              {metrics.recentActivities.map((a: any) => {
-                const isNote = a.entry_type === 'note';
-                const icon = isNote ? '📝'
-                  : a.activity_type === 'call' ? '📞'
-                  : a.activity_type === 'email' ? '📧'
-                  : a.activity_type === 'visit' || a.activity_type === 'drop_in' ? '🚗'
-                  : a.activity_type === 'meeting' ? '🤝'
-                  : a.activity_type === 'text' ? '💬'
-                  : '📋';
-                const label = isNote ? 'note' : (a.activity_type || 'activity').replace(/_/g, ' ');
-                const snippet = a.description
-                  ? a.description.length > 80 ? a.description.slice(0, 80) + '…' : a.description
-                  : null;
-                return (
-                  <Link
-                    key={`${a.entry_type}-${a.id}`}
-                    to={`/accounts/${a.account_id}`}
-                    className="flex items-start gap-2 sm:gap-3 py-2 border-b border-navy-50 last:border-0 hover:bg-navy-50 -mx-2 px-2 rounded transition-colors"
-                  >
-                    <div className="w-7 h-7 sm:w-8 sm:h-8 rounded-full bg-navy-100 flex items-center justify-center text-xs sm:text-sm flex-shrink-0">
-                      {icon}
-                    </div>
-                    <div className="min-w-0 flex-1">
-                      <div className="text-xs sm:text-sm text-navy-900">
-                        <span className="font-medium">{a.first_name}</span> added a {label} on <span className="font-medium">{a.shop_name}</span>
-                      </div>
-                      {snippet && (
-                        <div className="text-[10px] sm:text-xs text-navy-500 mt-0.5 truncate">{snippet}</div>
-                      )}
-                      <div className="text-[10px] sm:text-xs text-navy-400 mt-0.5">
-                        {new Date(a.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' })}
-                      </div>
-                    </div>
-                  </Link>
+            <div className="divide-y divide-navy-50">
+              {(() => {
+                // Group entries by salesperson (first + last name, falling back to rep_id)
+                type Entry = any;
+                const groups = new Map<string, { label: string; entries: Entry[] }>();
+                for (const a of metrics.recentActivities as Entry[]) {
+                  const fullName = `${a.first_name || ''} ${a.last_name || ''}`.trim() || 'Unassigned';
+                  const key = String(a.rep_id ?? fullName);
+                  if (!groups.has(key)) groups.set(key, { label: fullName, entries: [] });
+                  groups.get(key)!.entries.push(a);
+                }
+                // Sort groups by most recent entry first
+                const sortedGroups = Array.from(groups.entries()).sort(
+                  ([, aG], [, bG]) =>
+                    new Date(bG.entries[0].created_at).getTime() -
+                    new Date(aG.entries[0].created_at).getTime()
                 );
-              })}
+                return sortedGroups.map(([key, { label, entries }]) => {
+                  const isOpen = expandedReps.has(key);
+                  const latest = entries[0];
+                  return (
+                    <div key={key} className="py-1">
+                      <button
+                        type="button"
+                        onClick={() => toggleRep(key)}
+                        aria-expanded={isOpen}
+                        className="w-full flex items-center gap-2 sm:gap-3 py-2 -mx-2 px-2 rounded hover:bg-navy-50 transition-colors text-left"
+                      >
+                        <span
+                          className={`text-navy-400 text-xs transition-transform flex-shrink-0 ${isOpen ? 'rotate-90' : ''}`}
+                          aria-hidden="true"
+                        >
+                          ▶
+                        </span>
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="font-medium text-navy-900 text-xs sm:text-sm truncate">{label}</span>
+                            <span className="text-[10px] sm:text-xs text-navy-400 flex-shrink-0">
+                              {entries.length} {entries.length === 1 ? 'entry' : 'entries'}
+                            </span>
+                          </div>
+                          <div className="text-[10px] sm:text-xs text-navy-400 truncate">
+                            Last: {new Date(latest.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} · {latest.shop_name}
+                          </div>
+                        </div>
+                      </button>
+                      {isOpen && (
+                        <div className="ml-5 sm:ml-6 pl-2 border-l border-navy-100 space-y-1 pb-2">
+                          {entries.map((a: Entry) => {
+                            const isNote = a.entry_type === 'note';
+                            const icon = isNote ? '📝'
+                              : a.activity_type === 'call' ? '📞'
+                              : a.activity_type === 'email' ? '📧'
+                              : a.activity_type === 'visit' || a.activity_type === 'drop_in' ? '🚗'
+                              : a.activity_type === 'meeting' ? '🤝'
+                              : a.activity_type === 'text' ? '💬'
+                              : '📋';
+                            const actionLabel = isNote ? 'note' : (a.activity_type || 'activity').replace(/_/g, ' ');
+                            const snippet = a.description
+                              ? a.description.length > 80 ? a.description.slice(0, 80) + '…' : a.description
+                              : null;
+                            return (
+                              <Link
+                                key={`${a.entry_type ?? 'activity'}-${a.id}`}
+                                to={`/accounts/${a.account_id}`}
+                                className="flex items-start gap-2 py-1.5 px-2 -mx-2 rounded hover:bg-navy-50 transition-colors"
+                              >
+                                <div className="w-6 h-6 sm:w-7 sm:h-7 rounded-full bg-navy-100 flex items-center justify-center text-xs flex-shrink-0">
+                                  {icon}
+                                </div>
+                                <div className="min-w-0 flex-1">
+                                  <div className="text-xs sm:text-sm text-navy-900">
+                                    <span className="font-medium">{actionLabel}</span> on <span className="font-medium">{a.shop_name}</span>
+                                  </div>
+                                  {snippet && (
+                                    <div className="text-[10px] sm:text-xs text-navy-500 mt-0.5 truncate">{snippet}</div>
+                                  )}
+                                  <div className="text-[10px] sm:text-xs text-navy-400 mt-0.5">
+                                    {new Date(a.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' })}
+                                  </div>
+                                </div>
+                              </Link>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  );
+                });
+              })()}
             </div>
           ) : (
             <p className="text-navy-400 text-sm py-8 text-center">No recent activity. Start logging calls and visits!</p>

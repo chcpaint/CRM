@@ -227,7 +227,7 @@ async function runGDriveImport(queryAll, queryOne, execute) {
     const processedFolderId = await getOrCreateProcessedFolder(drive, folderId);
 
     // Load all accounts for matching
-    const allAccounts = await queryAll('SELECT id, shop_name FROM accounts WHERE deleted_at IS NULL');
+    const allAccounts = await queryAll('SELECT id, shop_name FROM accounts WHERE deleted_at IS NULL AND excluded_from_import = false');
 
     let totalImported = 0;
     let totalUnmatched = 0;

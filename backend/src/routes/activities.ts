@@ -38,10 +38,10 @@ router.post('/accounts/:accountId/activities', authenticate, (req: AuthRequest, 
   }
 });
 
-// GET /api/activities/reminders - dormant accounts (no contact in 14+ days)
+// GET /api/activities/reminders - dormant ACTIVE accounts (no note/activity in 30+ days)
 router.get('/activities/reminders', authenticate, (req: AuthRequest, res: Response) => {
   try {
-    const days = parseInt(req.query.days as string) || 14;
+    const days = parseInt(req.query.days as string) || 30;
     const repFilter = req.user!.role === 'rep' ? 'AND a.assigned_rep_id = ?' : '';
     const params: any[] = [days];
     if (req.user!.role === 'rep') params.push(req.user!.userId);
@@ -51,7 +51,7 @@ router.get('/activities/reminders', authenticate, (req: AuthRequest, res: Respon
        FROM accounts a
        LEFT JOIN users u ON a.assigned_rep_id = u.id
        WHERE a.deleted_at IS NULL
-       AND a.status IN ('prospect', 'active')
+       AND a.status = 'active'
        AND (a.last_contacted_at IS NULL OR a.last_contacted_at < datetime('now', '-' || ? || ' days'))
        ${repFilter}
        ORDER BY a.last_contacted_at ASC NULLS FIRST

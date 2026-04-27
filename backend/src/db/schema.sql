@@ -455,3 +455,14 @@ BEGIN
   );
 END;
 $$ LANGUAGE plpgsql;
+
+-- ─── FIX SERIAL SEQUENCES ──────────────────────────────────────────
+-- After bulk imports, serial sequences can fall behind the actual max id,
+-- causing "duplicate key violates unique constraint" on the next INSERT.
+-- This resets every sequence to MAX(id)+1 on each deploy (safe to re-run).
+SELECT setval('activities_id_seq',  COALESCE((SELECT MAX(id) FROM activities),  0) + 1, false);
+SELECT setval('notes_id_seq',       COALESCE((SELECT MAX(id) FROM notes),       0) + 1, false);
+SELECT setval('accounts_id_seq',    COALESCE((SELECT MAX(id) FROM accounts),    0) + 1, false);
+SELECT setval('sales_data_id_seq',  COALESCE((SELECT MAX(id) FROM sales_data),  0) + 1, false);
+SELECT setval('users_id_seq',       COALESCE((SELECT MAX(id) FROM users),       0) + 1, false);
+SELECT setval('audit_log_id_seq',   COALESCE((SELECT MAX(id) FROM audit_log),   0) + 1, false);

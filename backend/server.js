@@ -2510,6 +2510,129 @@ async function startServer() {
   });
   console.log('  PCR customer sync: scheduled nightly at 06:00 UTC');
 
+  // ============================================================================
+  //  HOLDS SYNC FROM CHC INTRANET
+  // ============================================================================
+  const INTRANET_URL = process.env.INTRANET_SUPABASE_URL || 'https://eijlxtplywjbilijlyzf.supabase.co';
+  const INTRANET_KEY = process.env.INTRANET_SUPABASE_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImVpamx4dHBseXdqYmlsaWpseXpmIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzMwODIyMDksImV4cCI6MjA4ODY1ODIwOX0.63EbmnL1UCGyczinq1NxuvCux4LwJDlwhMvD9rYr5rg';
+  const HOLDS_TABLE = process.env.INTRANET_HOLDS_TABLE || 'holds';
+
+  async function syncHoldsFromIntranet() {
+    console.log('[Holds Sync] Starting sync from CHC Intranet...');
+    const startTime = Date.now();
+
+    // 1. Fetch holds from the intranet Supabase REST API
+    const url = `${INTRANET_URL}/rest/v1/${HOLDS_TABLE}?select=*`;
+    const resp = await fetch(url, {
+      headers: {
+        'apikey': INTRANET_KEY,
+        'Authorization': `Bearer ${INTRANET_KEY}`,
+        'Content-Type': 'application/json',
+      },
+    });
+
+    if (!resp.ok) {
+      const errText = await resp.text().catch(() => '');
+      throw new Error(`Intranet API returned ${resp.status}: ${errText}`);
+    }
+
+    const intranetHolds = await resp.json();
+    if (!Array.isArray(intranetHolds)) {
+      throw new Error('Intranet returned non-array response');
+    }
+
+    console.log(`[Holds Sync] Fetched ${intranetHolds.length} holds from intranet`);
+
+    let upserted = 0;
+    let deactivated = 0;
+    let matched = 0;
+
+    // 2. Upsert each hold into the CRM
+    for (const h of intranetHolds) {
+      // Determine the intranet ID (could be 'id', 'hold_id', etc.)
+      const intranetId = String(h.id || h.hold_id || h.intranet_id || '');
+      if (!intranetId) continue;
+
+      const customerName = h.customer_name || h.name || h.shop_name || '';
+      if (!customerName) continue;
+
+      const branch = h.branch || h.location || null;
+      const reason = h.reason || h.hold_reason || h.notes || null;
+      const addedAt = h.added_at || h.created_at || h.date_added || null;
+      const addedBy = h.added_by || h.created_by || null;
+      const updates = h.updates || h.hold_updates || '[]';
+      const updatesJson = typeof updates === 'string' ? updates : JSON.stringify(updates);
+      const isActive = h.is_active !== undefined ? h.is_active : (h.status !== 'resolved' && h.status !== 'removed');
+      const intranetUpdatedAt = h.updated_at || h.last_updated || h.intranet_updated_at || null;
+
+      // Try to match to a CRM account by name (fuzzy)
+      let accountId = null;
+      const acct = await queryOne(
+        `SELECT id FROM accounts
+         WHERE LOWER(TRIM(shop_name)) = LOWER(TRIM($1)) AND deleted_at IS NULL
+         LIMIT 1`,
+        [customerName]
+      );
+      if (acct) {
+        accountId = acct.id;
+        matched++;
+      }
+
+      // Upsert by intranet_id
+      await execute(
+        `INSERT INTO holds (intranet_id, customer_name, branch, reason, added_at, added_by,
+                            updates, intranet_updated_at, account_id, is_active, synced_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10, NOW())
+         ON CONFLICT (intranet_id) DO UPDATE SET
+           customer_name = EXCLUDED.customer_name,
+           branch = EXCLUDED.branch,
+           reason = EXCLUDED.reason,
+           added_at = EXCLUDED.added_at,
+           added_by = EXCLUDED.added_by,
+           updates = EXCLUDED.updates,
+           intranet_updated_at = EXCLUDED.intranet_updated_at,
+           account_id = COALESCE(holds.account_id, EXCLUDED.account_id),
+           is_active = EXCLUDED.is_active,
+           synced_at = NOW()`,
+        [intranetId, customerName, branch, reason, addedAt, addedBy,
+         updatesJson, intranetUpdatedAt, accountId, isActive]
+      );
+      upserted++;
+    }
+
+    // 3. Mark holds as inactive if they're no longer in the intranet feed
+    if (intranetHolds.length > 0) {
+      const intranetIds = intranetHolds
+        .map(h => String(h.id || h.hold_id || h.intranet_id || ''))
+        .filter(Boolean);
+      if (intranetIds.length > 0) {
+        const placeholders = intranetIds.map((_, idx) => `$${idx + 1}`).join(',');
+        const result = await execute(
+          `UPDATE holds SET is_active = false
+           WHERE is_active = true AND intranet_id IS NOT NULL
+             AND intranet_id NOT IN (${placeholders})`,
+          intranetIds
+        );
+        deactivated = result.changes || 0;
+      }
+    }
+
+    const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+    const summary = { upserted, deactivated, matched, elapsed_sec: elapsed, synced_at: new Date().toISOString() };
+    console.log(`[Holds Sync] Complete:`, JSON.stringify(summary));
+    return summary;
+  }
+
+  // Cron: sync holds every 6 hours (at :15 past to avoid collisions with PCR sync)
+  cron.schedule('15 */6 * * *', async () => {
+    try {
+      await syncHoldsFromIntranet();
+    } catch (err) {
+      console.error('[Holds Sync Cron] Failed:', err.message);
+    }
+  });
+  console.log('  Holds sync: scheduled every 6 hours (0:15, 6:15, 12:15, 18:15 UTC)');
+
   // ─── CHECK PCR MATCH: check if a lead has a matching PCR shop ───
   app.get('/api/accounts/:id/pcr-match', authenticate, async (req, res) => {
     try {
@@ -3521,9 +3644,9 @@ async function startServer() {
   app.post('/api/holds/refresh', authenticate, async (req, res) => {
     try {
       if (!isManagerOrAdmin(req.user)) return res.status(403).json({ error: 'Forbidden' });
-      const r = await queryOne(`SELECT public.refresh_holds_from_intranet() AS result`);
-      await logAudit(req, 'holds', null, 'refresh', r?.result || {});
-      res.json({ ok: true, result: r?.result });
+      const result = await syncHoldsFromIntranet();
+      await logAudit(req, 'holds', null, 'refresh', result);
+      res.json({ ok: true, result });
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
 

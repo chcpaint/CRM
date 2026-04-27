@@ -117,6 +117,15 @@
   animation: slide-down 0.3s ease-out;
 }
 
+/* ─── Slide-up animation for mobile "More" sheet ─── */
+@keyframes slide-up {
+  0% { transform: translateY(20px); opacity: 0; }
+  100% { transform: translateY(0); opacity: 1; }
+}
+.animate-slide-up {
+  animation: slide-up 0.2s ease-out;
+}
+
 /* ─── Staggered entry for lists/grids ─── */
 .stagger-children > * {
   opacity: 0;

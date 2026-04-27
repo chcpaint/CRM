@@ -12,22 +12,35 @@ interface LayoutProps {
 
 export default function Layout({ user, onLogout, children }: LayoutProps) {
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [moreOpen, setMoreOpen] = useState(false);
   const location = useLocation();
   const navigate = useNavigate();
 
-  const navItems = [
+  // Primary bottom-nav items (most used by the team)
+  const primaryNav = [
     { path: '/', label: 'Dashboard', icon: '\u{1F4CA}' },
-    { path: '/report', label: 'Daily Activities', icon: '\u{1F4CB}' },
+    { path: '/report', label: 'Activities', icon: '\u{1F4CB}' },
     { path: '/accounts', label: 'Accounts', icon: '\u{1F3E2}' },
     { path: '/sales', label: 'Sales', icon: '\u{1F4B0}' },
+  ];
+
+  // Overflow items — shown in sidebar + mobile "More" sheet
+  const secondaryNav = [
     { path: '/holds', label: 'On Hold', icon: '\u{26D4}' },
     { path: '/customer-alerts', label: 'Customer Alerts', icon: '\u{26A0}\u{FE0F}' },
-    { path: '/competitive-market-info', label: 'Competitive Market Info', icon: '\u{1F4C8}' },
+    { path: '/competitive-market-info', label: 'Competitive Market Info', icon: '\u{1F4C9}' },
   ];
 
   if (user.role === 'admin' || user.role === 'manager') {
-    navItems.push({ path: '/admin', label: 'Admin', icon: '\u{2699}\u{FE0F}' });
+    secondaryNav.push({ path: '/admin', label: 'Admin', icon: '\u{2699}\u{FE0F}' });
   }
+
+  const navItems = [...primaryNav, ...secondaryNav];
+
+  // Is the current page one of the secondary items?
+  const isSecondaryActive = secondaryNav.some(s =>
+    s.path === '/' ? location.pathname === '/' : location.pathname.startsWith(s.path)
+  );
 
   const isActive = (path: string) =>
     path === '/' ? location.pathname === '/' : location.pathname.startsWith(path);
@@ -119,25 +132,68 @@ export default function Layout({ user, onLogout, children }: LayoutProps) {
         </div>
       </aside>
 
-      {/* Mobile bottom navigation */}
+      {/* Mobile bottom navigation — 4 primary + More */}
       <nav className="lg:hidden fixed bottom-0 left-0 right-0 z-50 bg-white border-t border-navy-200 shadow-[0_-2px_10px_rgba(0,0,0,0.1)]">
-        <div className="flex items-center justify-around px-2 py-1">
-          {navItems.map((item) => (
+        <div className="flex items-center justify-around px-1">
+          {primaryNav.map((item) => (
             <Link
               key={item.path}
               to={item.path}
-              className={`flex flex-col items-center gap-0.5 px-3 py-2 rounded-lg text-xs font-medium transition-colors min-w-0
+              onClick={() => setMoreOpen(false)}
+              className={`flex flex-col items-center gap-0.5 px-2 py-2 rounded-lg text-[11px] font-medium transition-colors min-w-0 flex-1
                 ${isActive(item.path)
                   ? 'text-brand-600'
-                  : 'text-navy-400 hover:text-navy-600'
+                  : 'text-navy-400'
                 }`}
             >
-              <span className="text-lg">{item.icon}</span>
-              <span className="truncate">{item.label}</span>
+              <span className="text-xl leading-none">{item.icon}</span>
+              <span className="truncate max-w-full">{item.label}</span>
             </Link>
           ))}
+          {/* More button */}
+          <button
+            onClick={() => setMoreOpen(o => !o)}
+            className={`flex flex-col items-center gap-0.5 px-2 py-2 rounded-lg text-[11px] font-medium transition-colors min-w-0 flex-1
+              ${moreOpen || isSecondaryActive ? 'text-brand-600' : 'text-navy-400'}`}
+          >
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <circle cx="12" cy="5" r="1.5" fill="currentColor" />
+              <circle cx="12" cy="12" r="1.5" fill="currentColor" />
+              <circle cx="12" cy="19" r="1.5" fill="currentColor" />
+            </svg>
+            <span>More</span>
+          </button>
         </div>
       </nav>
+
+      {/* "More" slide-up sheet (mobile) */}
+      {moreOpen && (
+        <>
+          <div
+            className="fixed inset-0 bg-black/40 z-[55] lg:hidden"
+            onClick={() => setMoreOpen(false)}
+          />
+          <div className="fixed bottom-[60px] left-2 right-2 z-[56] lg:hidden bg-white rounded-2xl shadow-2xl border border-navy-100 overflow-hidden animate-slide-up">
+            <div className="p-2">
+              {secondaryNav.map((item) => (
+                <Link
+                  key={item.path}
+                  to={item.path}
+                  onClick={() => setMoreOpen(false)}
+                  className={`flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-medium transition-colors
+                    ${isActive(item.path)
+                      ? 'bg-brand-50 text-brand-700'
+                      : 'text-navy-700 hover:bg-navy-50'
+                    }`}
+                >
+                  <span className="text-xl">{item.icon}</span>
+                  {item.label}
+                </Link>
+              ))}
+            </div>
+          </div>
+        </>
+      )}
 
       {/* Main content */}
       <main className="pt-14 sm:pt-16 lg:pl-56 min-h-screen pb-20 lg:pb-0">

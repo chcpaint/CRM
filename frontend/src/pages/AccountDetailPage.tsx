@@ -245,9 +245,13 @@ export default function AccountDetailPage({ user }: Props) {
     }
   };
 
+  // Note save error toast
+  const [noteSaveError, setNoteSaveError] = useState<string | null>(null);
+
   const saveNote = async () => {
     if (!newNote.trim() || savingNote) return;
     setSavingNote(true);
+    setNoteSaveError(null);
     try {
       await api.post(`/accounts/${id}/notes`, {
         content: newNote.trim(),
@@ -260,19 +264,22 @@ export default function AccountDetailPage({ user }: Props) {
           description: newNote.trim()
         });
       }
-      // Clear everything first, then remove from storage
+      // Clear textarea immediately — force the DOM to update on mobile
       setNewNote('');
       setNoteActivityType('none');
       setDraftRestored(false);
       try { sessionStorage.removeItem(draftKey); } catch {}
 
-      // Show "Note Saved!" confirmation
+      // Show "Note Saved!" confirmation (in-card + fixed toast)
       setNoteSaved(true);
-      setTimeout(() => setNoteSaved(false), 3000);
+      setTimeout(() => setNoteSaved(false), 4000);
 
       loadAccount();
-    } catch (err) {
+    } catch (err: any) {
       console.error(err);
+      const msg = err?.message || err?.error || 'Could not save note. Check your connection and try again.';
+      setNoteSaveError(msg);
+      setTimeout(() => setNoteSaveError(null), 5000);
     } finally {
       setSavingNote(false);
     }
@@ -531,6 +538,24 @@ export default function AccountDetailPage({ user }: Props) {
               </button>
             </div>
           </div>
+        </div>
+      )}
+
+      {/* ─── Note save confirmation toast (fixed position — always visible on mobile) ─── */}
+      {noteSaved && (
+        <div className="fixed top-4 left-1/2 -translate-x-1/2 z-50 bg-green-600 text-white text-sm font-semibold px-5 py-3 rounded-xl shadow-2xl animate-slide-down flex items-center gap-2">
+          <svg className="w-5 h-5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7" />
+          </svg>
+          Note Saved!
+        </div>
+      )}
+      {noteSaveError && (
+        <div className="fixed top-4 left-1/2 -translate-x-1/2 z-50 bg-red-600 text-white text-sm font-semibold px-5 py-3 rounded-xl shadow-2xl animate-slide-down flex items-center gap-2 max-w-[90vw]">
+          <svg className="w-5 h-5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M6 18L18 6M6 6l12 12" />
+          </svg>
+          {noteSaveError}
         </div>
       )}
 
@@ -953,13 +978,30 @@ export default function AccountDetailPage({ user }: Props) {
         {/* Notes & Activities — full width */}
         <div className="space-y-4 sm:space-y-6">
           {/* Add Note — with optional activity type dropdown */}
-          <div className={`card transition-all ${noteSaved ? 'ring-2 ring-green-400 border-green-300' : newNote.trim() ? 'ring-2 ring-amber-400 border-amber-300' : ''}`}>
+          <div
+            className="card transition-all"
+            style={noteSaved
+              ? { boxShadow: '0 0 0 3px rgba(34,197,94,0.5)', borderColor: '#86efac' }
+              : newNote.trim()
+                ? { boxShadow: '0 0 0 3px rgba(245,158,11,0.4)', borderColor: '#fcd34d' }
+                : undefined
+            }
+          >
             <div className="flex items-center justify-between mb-3">
               <h3 className="font-bold text-navy-900">Add Note</h3>
               <div className="flex items-center gap-2">
                 {draftRestored && newNote.trim() && (
                   <span className="text-xs font-semibold text-blue-600 bg-blue-50 border border-blue-200 px-2 py-0.5 rounded-full">
                     Draft restored
+                  </span>
+                )}
+                {savingNote && (
+                  <span className="text-xs font-bold text-blue-700 bg-blue-100 border border-blue-300 px-3 py-1 rounded-full flex items-center gap-1">
+                    <svg className="w-3.5 h-3.5 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <circle cx="12" cy="12" r="10" strokeWidth={2} className="opacity-25" />
+                      <path strokeLinecap="round" strokeWidth={2.5} d="M4 12a8 8 0 018-8" className="opacity-75" />
+                    </svg>
+                    Saving...
                   </span>
                 )}
                 {noteSaved && (
@@ -970,21 +1012,24 @@ export default function AccountDetailPage({ user }: Props) {
                     Note Saved!
                   </span>
                 )}
-                {!noteSaved && newNote.trim() && (
-                  <span className="text-xs font-semibold text-amber-600 bg-amber-50 border border-amber-200 px-2 py-0.5 rounded-full animate-pulse-soft">
-                    Unsaved — don't forget to Save!
+                {!noteSaved && !savingNote && newNote.trim() && (
+                  <span className="text-xs font-semibold text-amber-700 bg-amber-100 border border-amber-300 px-3 py-1 rounded-full flex items-center gap-1">
+                    <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                    </svg>
+                    Unsaved
                   </span>
                 )}
               </div>
             </div>
             {noteSaved ? (
-              <div className="bg-green-50 border border-green-200 rounded-xl p-6 text-center">
-                <div className="text-3xl mb-2">&#10003;</div>
-                <p className="text-green-800 font-semibold">Note saved successfully!</p>
+              <div className="bg-green-50 border-2 border-green-300 rounded-xl p-6 text-center">
+                <div className="text-4xl mb-2">&#10003;</div>
+                <p className="text-green-800 font-bold text-lg">Note Saved!</p>
                 <p className="text-green-600 text-sm mt-1">Your note has been added to the timeline below.</p>
                 <button
                   onClick={() => setNoteSaved(false)}
-                  className="mt-3 text-sm text-green-700 hover:text-green-900 underline"
+                  className="mt-4 bg-green-600 text-white font-semibold text-sm px-4 py-2 rounded-lg hover:bg-green-700 transition-colors"
                 >
                   Add another note
                 </button>
@@ -1035,8 +1080,26 @@ export default function AccountDetailPage({ user }: Props) {
                   <span className="text-xs text-navy-400 hidden sm:inline">
                     {noteActivityType !== 'none' ? `Will also log as: ${ACTIVITY_TAGS[noteActivityType]?.label}` : 'Optional: tag as activity type'}
                   </span>
-                  <button onClick={saveNote} disabled={savingNote || !newNote.trim()} className="btn-primary ml-auto">
-                    {savingNote ? 'Saving...' : 'Save'}
+                  <button
+                    onClick={saveNote}
+                    disabled={savingNote || !newNote.trim()}
+                    className={`ml-auto font-semibold px-5 py-2 rounded-lg text-sm transition-all ${
+                      savingNote
+                        ? 'bg-blue-500 text-white cursor-wait'
+                        : newNote.trim()
+                          ? 'bg-green-600 text-white hover:bg-green-700 active:scale-95 shadow-md'
+                          : 'bg-navy-200 text-navy-400 cursor-not-allowed'
+                    }`}
+                  >
+                    {savingNote ? (
+                      <span className="flex items-center gap-2">
+                        <svg className="w-4 h-4 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <circle cx="12" cy="12" r="10" strokeWidth={2} className="opacity-25" />
+                          <path strokeLinecap="round" strokeWidth={2.5} d="M4 12a8 8 0 018-8" className="opacity-75" />
+                        </svg>
+                        Saving...
+                      </span>
+                    ) : 'Save Note'}
                   </button>
                 </div>
               </>

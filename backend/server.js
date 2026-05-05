@@ -3030,25 +3030,233 @@ async function startServer() {
     try {
       const flag = await queryOne('SELECT * FROM duplicate_flags WHERE id=$1', [req.params.flagId]);
       if (!flag) return res.status(404).json({ error: 'Flag not found' });
-      const leadId = flag.account_1_id;
-      const activeId = flag.account_2_id;
-      // Transfer any remaining notes from lead to active
-      const leadNotes = await queryAll('SELECT * FROM notes WHERE account_id=$1 ORDER BY created_at', [leadId]);
-      const lead = await queryOne('SELECT shop_name FROM accounts WHERE id=$1', [leadId]);
-      let transferred = 0;
+      const deleteId = flag.account_1_id;  // account to be deleted
+      const keepId = flag.account_2_id;    // account to keep (more active)
+
+      const deleteAcct = await queryOne('SELECT * FROM accounts WHERE id=$1', [deleteId]);
+      const keepAcct = await queryOne('SELECT * FROM accounts WHERE id=$1', [keepId]);
+      if (!deleteAcct || !keepAcct) return res.status(404).json({ error: 'Account not found' });
+
+      // ── 1. MERGE ACCOUNT FIELDS ──
+      // Fill in any blank fields on the kept account from the deleted account.
+      // The kept account's existing data always takes priority.
+      const mergeFields = [
+        'address', 'city', 'area', 'province', 'postal_code',
+        'contact_names', 'phone', 'phone2', 'email',
+        'account_type', 'suppliers', 'paint_line', 'allied_products', 'sundries',
+        'mpo', 'sq_footage', 'banner',
+        'cup_brand', 'paper_brand', 'filler_brand',
+        'deal_details', 'business_type_notes',
+        'accountedge_card_id', 'pcr_shop_name', 'pcr_customer_id',
+        'branch', 'contract_status', 'contract_file_path',
+      ];
+      const mergeIntFields = [
+        'num_techs', 'num_painters', 'num_body_men', 'num_paint_booths',
+      ];
+      const mergeFloatFields = ['annual_revenue'];
+      const mergeBoolFields = ['has_contract', 'former_sherwin_client', 'pcr_managed'];
+
+      const updates = [];
+      const updateParams = [];
+      let pi = 1;
+      const mergedFields = [];
+
+      for (const f of mergeFields) {
+        if ((!keepAcct[f] || keepAcct[f] === '') && deleteAcct[f] && deleteAcct[f] !== '') {
+          updates.push(`${f} = $${pi++}`);
+          updateParams.push(deleteAcct[f]);
+          mergedFields.push(f);
+        }
+      }
+      for (const f of mergeIntFields) {
+        if (keepAcct[f] == null && deleteAcct[f] != null) {
+          updates.push(`${f} = $${pi++}`);
+          updateParams.push(deleteAcct[f]);
+          mergedFields.push(f);
+        }
+      }
+      for (const f of mergeFloatFields) {
+        if (keepAcct[f] == null && deleteAcct[f] != null) {
+          updates.push(`${f} = $${pi++}`);
+          updateParams.push(deleteAcct[f]);
+          mergedFields.push(f);
+        }
+      }
+      for (const f of mergeBoolFields) {
+        // Only merge booleans that are true on the deleted account but not set on the kept
+        if (deleteAcct[f] === true && keepAcct[f] !== true) {
+          updates.push(`${f} = $${pi++}`);
+          updateParams.push(true);
+          mergedFields.push(f);
+        }
+      }
+
+      // Merge assigned_rep_id: keep existing, fill if blank
+      if (!keepAcct.assigned_rep_id && deleteAcct.assigned_rep_id) {
+        updates.push(`assigned_rep_id = $${pi++}`);
+        updateParams.push(deleteAcct.assigned_rep_id);
+        mergedFields.push('assigned_rep_id (primary salesperson)');
+      }
+      // Merge secondary_rep_id: keep existing, fill if blank.
+      // If the kept account already has the same primary rep but no secondary,
+      // and the deleted account has a different rep, add it as secondary.
+      if (!keepAcct.secondary_rep_id && deleteAcct.assigned_rep_id
+          && deleteAcct.assigned_rep_id !== keepAcct.assigned_rep_id) {
+        updates.push(`secondary_rep_id = $${pi++}`);
+        updateParams.push(deleteAcct.assigned_rep_id);
+        mergedFields.push('secondary_rep_id (from deleted account primary)');
+      } else if (!keepAcct.secondary_rep_id && deleteAcct.secondary_rep_id) {
+        updates.push(`secondary_rep_id = $${pi++}`);
+        updateParams.push(deleteAcct.secondary_rep_id);
+        mergedFields.push('secondary_rep_id');
+      }
+
+      // Merge follow_up_date: keep the earliest upcoming date
+      if (deleteAcct.follow_up_date && (!keepAcct.follow_up_date || deleteAcct.follow_up_date < keepAcct.follow_up_date)) {
+        updates.push(`follow_up_date = $${pi++}`);
+        updateParams.push(deleteAcct.follow_up_date);
+        mergedFields.push('follow_up_date');
+      }
+
+      // Merge contract_expiration_date: keep if missing
+      if (!keepAcct.contract_expiration_date && deleteAcct.contract_expiration_date) {
+        updates.push(`contract_expiration_date = $${pi++}`);
+        updateParams.push(deleteAcct.contract_expiration_date);
+        mergedFields.push('contract_expiration_date');
+      }
+
+      // Merge tags: combine unique tags from both
+      let keepTags = [];
+      let deleteTags = [];
+      try { keepTags = JSON.parse(keepAcct.tags || '[]'); } catch {}
+      try { deleteTags = JSON.parse(deleteAcct.tags || '[]'); } catch {}
+      if (typeof keepAcct.tags === 'object' && Array.isArray(keepAcct.tags)) keepTags = keepAcct.tags;
+      if (typeof deleteAcct.tags === 'object' && Array.isArray(deleteAcct.tags)) deleteTags = deleteAcct.tags;
+      const mergedTags = [...new Set([...keepTags, ...deleteTags])];
+      if (mergedTags.length > keepTags.length) {
+        updates.push(`tags = $${pi++}::jsonb`);
+        updateParams.push(JSON.stringify(mergedTags));
+        mergedFields.push('tags');
+      }
+
+      // Merge business_types: combine unique
+      let keepBT = [];
+      let deleteBT = [];
+      try { keepBT = JSON.parse(keepAcct.business_types || '[]'); } catch {}
+      try { deleteBT = JSON.parse(deleteAcct.business_types || '[]'); } catch {}
+      if (typeof keepAcct.business_types === 'object' && Array.isArray(keepAcct.business_types)) keepBT = keepAcct.business_types;
+      if (typeof deleteAcct.business_types === 'object' && Array.isArray(deleteAcct.business_types)) deleteBT = deleteAcct.business_types;
+      const mergedBT = [...new Set([...keepBT, ...deleteBT])];
+      if (mergedBT.length > keepBT.length) {
+        updates.push(`business_types = $${pi++}::jsonb`);
+        updateParams.push(JSON.stringify(mergedBT));
+        mergedFields.push('business_types');
+      }
+
+      // Merge phone_numbers and email_addresses (JSON arrays)
+      for (const arrayField of ['phone_numbers', 'email_addresses']) {
+        let keepArr = [];
+        let deleteArr = [];
+        try { keepArr = JSON.parse(keepAcct[arrayField] || '[]'); } catch {}
+        try { deleteArr = JSON.parse(deleteAcct[arrayField] || '[]'); } catch {}
+        if (typeof keepAcct[arrayField] === 'object' && Array.isArray(keepAcct[arrayField])) keepArr = keepAcct[arrayField];
+        if (typeof deleteAcct[arrayField] === 'object' && Array.isArray(deleteAcct[arrayField])) deleteArr = deleteAcct[arrayField];
+        const merged = [...new Set([...keepArr, ...deleteArr].map(v => typeof v === 'string' ? v.trim() : JSON.stringify(v)).filter(Boolean))];
+        if (merged.length > keepArr.length) {
+          updates.push(`${arrayField} = $${pi++}`);
+          updateParams.push(JSON.stringify(merged));
+          mergedFields.push(arrayField);
+        }
+      }
+
+      // Merge contact_names: append if different
+      if (deleteAcct.contact_names && keepAcct.contact_names
+          && deleteAcct.contact_names.toLowerCase().trim() !== keepAcct.contact_names.toLowerCase().trim()) {
+        // Combine contact names, deduplicating
+        const keepContacts = keepAcct.contact_names.split(/[,;]/).map(c => c.trim()).filter(Boolean);
+        const deleteContacts = deleteAcct.contact_names.split(/[,;]/).map(c => c.trim()).filter(Boolean);
+        const allContacts = [...new Set([...keepContacts, ...deleteContacts.filter(dc =>
+          !keepContacts.some(kc => kc.toLowerCase() === dc.toLowerCase())
+        )])];
+        if (allContacts.length > keepContacts.length) {
+          updates.push(`contact_names = $${pi++}`);
+          updateParams.push(allContacts.join(', '));
+          mergedFields.push('contact_names');
+        }
+      }
+
+      // Apply the merged fields to the kept account
+      if (updates.length > 0) {
+        updates.push(`updated_at = NOW()`);
+        updateParams.push(keepId);
+        await execute(
+          `UPDATE accounts SET ${updates.join(', ')} WHERE id = $${pi}`,
+          updateParams
+        );
+      }
+
+      // ── 2. TRANSFER NOTES ──
+      const leadNotes = await queryAll('SELECT * FROM notes WHERE account_id=$1 ORDER BY created_at', [deleteId]);
+      let notesTransferred = 0;
       for (const note of leadNotes) {
         await execute(
           'INSERT INTO notes (account_id, created_by_id, content, is_voice_transcribed, created_at) VALUES ($1, $2, $3, $4, $5)',
-          [activeId, note.created_by_id, `[Transferred from Lead "${lead?.shop_name || 'Unknown'}"] ${note.content}`, note.is_voice_transcribed, note.created_at]
+          [keepId, note.created_by_id, `[Merged from "${deleteAcct.shop_name}"] ${note.content}`, note.is_voice_transcribed, note.created_at]
         );
-        transferred++;
+        notesTransferred++;
       }
-      // Soft-delete the lead
-      await execute('UPDATE accounts SET deleted_at = NOW() WHERE id = $1', [leadId]);
-      // Mark flag as merged
+
+      // ── 3. TRANSFER ACTIVITIES ──
+      const activitiesResult = await execute(
+        'UPDATE activities SET account_id = $1 WHERE account_id = $2',
+        [keepId, deleteId]
+      );
+      const activitiesTransferred = activitiesResult.changes || 0;
+
+      // ── 4. TRANSFER SALES DATA ──
+      const salesResult = await execute(
+        'UPDATE sales_data SET account_id = $1 WHERE account_id = $2',
+        [keepId, deleteId]
+      );
+      const salesTransferred = salesResult.changes || 0;
+
+      // ── 5. TRANSFER HOLDS ──
+      await execute(
+        'UPDATE holds SET account_id = $1 WHERE account_id = $2',
+        [keepId, deleteId]
+      );
+
+      // ── 6. TRANSFER CUSTOMER ALERT DISMISSALS ──
+      await execute(
+        'UPDATE customer_alert_dismissals SET account_id = $1 WHERE account_id = $2',
+        [keepId, deleteId]
+      );
+
+      // ── 7. SOFT-DELETE THE MERGED ACCOUNT ──
+      await execute('UPDATE accounts SET deleted_at = NOW() WHERE id = $1', [deleteId]);
+
+      // ── 8. MARK FLAG AS MERGED ──
       await execute("UPDATE duplicate_flags SET status = 'merged', resolved_at = NOW() WHERE id = $1", [req.params.flagId]);
-      await logAudit(req, 'account', leadId, 'delete', { reason: 'duplicate_merge', merged_into: activeId, notes_transferred: transferred });
-      res.json({ success: true, message: `Lead "${lead?.shop_name}" deleted. ${transferred} note(s) transferred to active customer.`, notesTransferred: transferred });
+
+      await logAudit(req, 'account', deleteId, 'duplicate_merge', {
+        merged_into: keepId,
+        kept_account: keepAcct.shop_name,
+        deleted_account: deleteAcct.shop_name,
+        notes_transferred: notesTransferred,
+        activities_transferred: activitiesTransferred,
+        sales_transferred: salesTransferred,
+        fields_merged: mergedFields,
+      });
+
+      const summary = [
+        `"${deleteAcct.shop_name}" merged into "${keepAcct.shop_name}".`,
+        notesTransferred > 0 ? `${notesTransferred} note(s)` : null,
+        activitiesTransferred > 0 ? `${activitiesTransferred} activity record(s)` : null,
+        salesTransferred > 0 ? `${salesTransferred} sales record(s)` : null,
+        mergedFields.length > 0 ? `${mergedFields.length} field(s) filled in` : null,
+      ].filter(Boolean).join(' | ');
+
+      res.json({ success: true, message: summary, notesTransferred, activitiesTransferred, salesTransferred, fieldsMerged: mergedFields });
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
 

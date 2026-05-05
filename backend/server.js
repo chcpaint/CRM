@@ -3127,10 +3127,24 @@ async function startServer() {
           acc.reorder_alerts_count += r.report.reorder_alerts_count || 0;
           return acc;
         }, { notes_count: 0, followups_due_today: 0, followups_overdue: 0, followups_upcoming_7d: 0, holds_count: 0, reorder_alerts_count: 0 });
-        const unassignedHolds = await queryOne(
-          `SELECT COUNT(*)::int AS c FROM public.holds WHERE is_active = true AND rep_id IS NULL`
+        // Get full holds list for team view (managers see all holds)
+        const allHolds = await queryAll(
+          `SELECT h.id, h.intranet_id, h.customer_name, h.branch, h.reason,
+                  h.added_at, h.added_by, h.updates, h.intranet_updated_at,
+                  h.account_id, h.rep_id,
+                  CASE WHEN h.added_at IS NULL THEN NULL ELSE (CURRENT_DATE - h.added_at::date)::int END AS days_on_hold,
+                  jsonb_array_length(COALESCE(h.updates,'[]'::jsonb)) AS update_count,
+                  a.shop_name, u.first_name AS rep_first_name, u.last_name AS rep_last_name
+             FROM public.holds h
+             LEFT JOIN public.accounts a ON a.id = h.account_id
+             LEFT JOIN public.users u ON u.id = h.rep_id
+            WHERE h.is_active = true
+            ORDER BY h.added_at DESC NULLS LAST`
         );
-        return res.json({ team: true, date, totals: teamTotals, reports, unassigned_holds: unassignedHolds?.c || 0 });
+        const unassignedHolds = (allHolds || []).filter(h => !h.rep_id && (!h.account_id)).length;
+        // Override the team holds_count with the actual total
+        teamTotals.holds_count = (allHolds || []).length;
+        return res.json({ team: true, date, totals: teamTotals, reports, unassigned_holds: unassignedHolds, holds_list: allHolds || [] });
       }
 
       // Personal report
@@ -3138,7 +3152,48 @@ async function startServer() {
         `SELECT public.fn_generate_daily_report($1, $2::date) AS payload`,
         [req.user.userId, date]
       );
-      res.json({ team: false, date, report: result?.payload || null });
+      let payload = result?.payload || null;
+
+      // Enrich holds: if the DB function returned 0 holds, query via account assignment
+      // (matches the same logic the On Hold page uses)
+      if (payload && (payload.holds_count === 0 || !payload.holds_list || payload.holds_list.length === 0)) {
+        const userRole = req.user.role;
+        let holdsQuery;
+        let holdsParams;
+        if (userRole === 'admin' || userRole === 'manager') {
+          // Admins/managers see all holds in personal report too
+          holdsQuery = `SELECT h.id, h.intranet_id, h.customer_name, h.account_id, h.branch, h.reason,
+                    h.added_at, h.added_by,
+                    CASE WHEN h.added_at IS NULL THEN NULL ELSE (CURRENT_DATE - h.added_at::date)::int END AS days_on_hold,
+                    jsonb_array_length(COALESCE(h.updates,'[]'::jsonb)) AS update_count,
+                    h.updates,
+                    (SELECT u2 FROM jsonb_array_elements(COALESCE(h.updates,'[]'::jsonb)) WITH ORDINALITY AS t2(u2, ord2)
+                     ORDER BY ord2 DESC LIMIT 1) AS latest_update
+               FROM public.holds h WHERE h.is_active = true ORDER BY h.added_at DESC NULLS LAST`;
+          holdsParams = [];
+        } else {
+          // Reps see holds linked via account assignment
+          holdsQuery = `SELECT h.id, h.intranet_id, h.customer_name, h.account_id, h.branch, h.reason,
+                    h.added_at, h.added_by,
+                    CASE WHEN h.added_at IS NULL THEN NULL ELSE (CURRENT_DATE - h.added_at::date)::int END AS days_on_hold,
+                    jsonb_array_length(COALESCE(h.updates,'[]'::jsonb)) AS update_count,
+                    h.updates,
+                    (SELECT u2 FROM jsonb_array_elements(COALESCE(h.updates,'[]'::jsonb)) WITH ORDINALITY AS t2(u2, ord2)
+                     ORDER BY ord2 DESC LIMIT 1) AS latest_update
+               FROM public.holds h
+              WHERE h.is_active = true
+                AND (h.rep_id = $1 OR h.account_id IN (SELECT id FROM accounts WHERE rep_id = $1 AND deleted_at IS NULL))
+              ORDER BY h.added_at DESC NULLS LAST`;
+          holdsParams = [req.user.userId];
+        }
+        const holdRows = await queryAll(holdsQuery, holdsParams);
+        if (holdRows && holdRows.length > 0) {
+          payload.holds_count = holdRows.length;
+          payload.holds_list = holdRows;
+        }
+      }
+
+      res.json({ team: false, date, report: payload });
     } catch (e) {
       console.error('daily-report error:', e);
       res.status(500).json({ error: e.message });
@@ -3530,11 +3585,16 @@ async function startServer() {
       const params = [];
       let i = 1;
       if (!isManagerOrAdmin(req.user)) {
-        where.push(`h.rep_id = $${i++}`);
+        // Match holds assigned directly to rep OR linked via account assignment
+        // This matches the fn_generate_daily_report logic
+        where.push(`(h.rep_id = $${i} OR h.account_id IN (SELECT id FROM accounts WHERE rep_id = $${i} AND deleted_at IS NULL))`);
         params.push(req.user.userId);
+        i++;
       } else if (req.query.rep_id) {
-        where.push(`h.rep_id = $${i++}`);
-        params.push(parseInt(req.query.rep_id, 10));
+        const repId = parseInt(req.query.rep_id, 10);
+        where.push(`(h.rep_id = $${i} OR h.account_id IN (SELECT id FROM accounts WHERE rep_id = $${i} AND deleted_at IS NULL))`);
+        params.push(repId);
+        i++;
       }
       if (req.query.branch) {
         where.push(`LOWER(h.branch) = LOWER($${i++})`);
@@ -3569,7 +3629,8 @@ async function startServer() {
       // Summary counts (manager view gets totals, rep view gets their own)
       const totRow = await queryOne(
         `SELECT COUNT(*)::int AS total,
-                COUNT(*) FILTER (WHERE rep_id IS NULL)::int AS unassigned,
+                COUNT(*) FILTER (WHERE rep_id IS NULL
+                  AND (account_id IS NULL OR account_id NOT IN (SELECT id FROM accounts WHERE rep_id IS NOT NULL AND deleted_at IS NULL)))::int AS unassigned,
                 MAX(intranet_updated_at) AS source_last_update,
                 (MAX(intranet_updated_at) IS NULL OR MAX(intranet_updated_at) < NOW() - INTERVAL '48 hours') AS source_stale
            FROM public.holds WHERE is_active = true`
@@ -3590,16 +3651,20 @@ async function startServer() {
       if (!isManagerOrAdmin(req.user)) return res.status(403).json({ error: 'Forbidden' });
       const rows = await queryAll(
         `SELECT u.id AS rep_id, u.first_name, u.last_name,
-                COUNT(h.id)::int AS holds_count,
+                COUNT(DISTINCT h.id)::int AS holds_count,
                 COALESCE(SUM(jsonb_array_length(COALESCE(h.updates,'[]'::jsonb))),0)::int AS update_count
            FROM public.users u
-           LEFT JOIN public.holds h ON h.rep_id = u.id AND h.is_active = true
+           LEFT JOIN public.holds h ON h.is_active = true
+             AND (h.rep_id = u.id OR h.account_id IN (SELECT id FROM accounts WHERE rep_id = u.id AND deleted_at IS NULL))
           WHERE u.is_active = true
           GROUP BY u.id, u.first_name, u.last_name
           ORDER BY holds_count DESC, u.first_name`
       );
       const unassigned = await queryOne(
-        `SELECT COUNT(*)::int AS c FROM public.holds WHERE is_active=true AND rep_id IS NULL`
+        `SELECT COUNT(*)::int AS c FROM public.holds
+          WHERE is_active = true
+            AND rep_id IS NULL
+            AND (account_id IS NULL OR account_id NOT IN (SELECT id FROM accounts WHERE rep_id IS NOT NULL AND deleted_at IS NULL))`
       );
       res.json({ by_rep: rows || [], unassigned: unassigned?.c || 0 });
     } catch (e) { res.status(500).json({ error: e.message }); }

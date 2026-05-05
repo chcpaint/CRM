@@ -126,10 +126,149 @@ function levenshtein(a, b) {
   return m[bl][al];
 }
 
+// Basic character-level similarity (kept for backward compat)
 function similarity(a, b) {
   const al = a.toLowerCase().trim(); const bl = b.toLowerCase().trim();
   if (al === bl) return 1; const max = Math.max(al.length, bl.length);
   return max === 0 ? 1 : 1 - levenshtein(al, bl) / max;
+}
+
+// ─── IMPROVED duplicate scoring (multi-signal, token-aware) ───
+// Common industry words that inflate Levenshtein scores for unrelated shops
+const INDUSTRY_NOISE = new Set([
+  'auto', 'body', 'collision', 'centre', 'center', 'paint', 'paints', 'painting',
+  'repair', 'repairs', 'shop', 'shops', 'inc', 'ltd', 'llc', 'corp', 'the', 'and', '&', 'of',
+  'service', 'services', 'automotive', 'refinish', 'refinishing', 'custom', 'pro', 'express',
+  'motor', 'motors', 'garage', 'coachworks', 'autobody', 'car', 'cars', 'vehicle', 'vehicles',
+  'supply', 'supplies', 'works', 'restoration', 'restorations', 'group', 'bodyshop',
+]);
+
+function normalizeForDupes(name) {
+  return (name || '')
+    .toLowerCase()
+    .replace(/[''`]/g, '')           // remove apostrophes
+    .replace(/[^a-z0-9\s]/g, ' ')    // strip punctuation
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function tokenize(name) {
+  return normalizeForDupes(name).split(' ').filter(Boolean);
+}
+
+// Simple stem: strip trailing 's' or 'es' for comparison
+function simpleStem(word) {
+  if (word.endsWith('es') && word.length > 4) return word.slice(0, -2);
+  if (word.endsWith('s') && word.length > 3) return word.slice(0, -1);
+  return word;
+}
+
+// Extract "meaningful" tokens (strip industry noise)
+function meaningfulTokens(name) {
+  return tokenize(name).filter(t => {
+    if (t.length <= 1) return false;
+    if (INDUSTRY_NOISE.has(t)) return false;
+    if (INDUSTRY_NOISE.has(simpleStem(t))) return false;
+    return true;
+  });
+}
+
+// Jaccard similarity on word tokens
+function tokenJaccard(a, b) {
+  const sa = new Set(tokenize(a));
+  const sb = new Set(tokenize(b));
+  if (sa.size === 0 && sb.size === 0) return 1;
+  let inter = 0;
+  for (const t of sa) if (sb.has(t)) inter++;
+  return inter / (sa.size + sb.size - inter);
+}
+
+// Multi-signal duplicate score: combines name, phone, city, contacts
+function duplicateScore(a, b) {
+  const signals = [];
+  let reason = [];
+
+  // 1. Full name Levenshtein similarity
+  const fullSim = similarity(a.shop_name || '', b.shop_name || '');
+
+  // 2. Meaningful token Jaccard (ignoring industry noise)
+  const aMeaningful = meaningfulTokens(a.shop_name || '');
+  const bMeaningful = meaningfulTokens(b.shop_name || '');
+
+  let meaningfulSim = 0;
+  if (aMeaningful.length === 0 && bMeaningful.length === 0) {
+    meaningfulSim = fullSim;
+  } else if (aMeaningful.length === 0 || bMeaningful.length === 0) {
+    meaningfulSim = 0;
+  } else {
+    // Check each meaningful token for close matches (handles typos + plurals)
+    const aSet = new Set(aMeaningful);
+    const bSet = new Set(bMeaningful);
+    let matched = 0;
+    for (const ta of aSet) {
+      for (const tb of bSet) {
+        if (ta === tb || simpleStem(ta) === simpleStem(tb) || similarity(ta, tb) >= 0.8) { matched++; break; }
+      }
+    }
+    meaningfulSim = matched / Math.max(aSet.size, bSet.size);
+  }
+
+  // Weighted name score: meaningful tokens dominate
+  const nameScore = meaningfulSim * 0.7 + fullSim * 0.3;
+  signals.push(nameScore);
+  if (nameScore > 0.6) reason.push(`name ${(nameScore * 100).toFixed(0)}%`);
+
+  // 3. Phone match (strong signal)
+  const aPhone = (a.phone || '').replace(/\D/g, '').slice(-10);
+  const bPhone = (b.phone || '').replace(/\D/g, '').slice(-10);
+  if (aPhone.length >= 7 && bPhone.length >= 7) {
+    if (aPhone === bPhone) {
+      signals.push(1.0);
+      reason.push('phone match');
+    } else {
+      signals.push(0);
+    }
+  }
+
+  // 4. City match (weak signal, boosts confidence)
+  if (a.city && b.city) {
+    const citySim = similarity(a.city, b.city);
+    if (citySim > 0.85) {
+      signals.push(0.8);
+      reason.push('same city');
+    } else {
+      signals.push(0.1);
+    }
+  }
+
+  // 5. Contact name overlap
+  const aContacts = normalizeForDupes(a.contact_names || '');
+  const bContacts = normalizeForDupes(b.contact_names || '');
+  if (aContacts.length > 2 && bContacts.length > 2) {
+    const contactSim = similarity(aContacts, bContacts);
+    if (contactSim > 0.6) {
+      signals.push(0.9);
+      reason.push('contacts overlap');
+    }
+  }
+
+  // 6. Email match
+  const aEmail = (a.email || '').toLowerCase().trim();
+  const bEmail = (b.email || '').toLowerCase().trim();
+  if (aEmail && bEmail && aEmail === bEmail) {
+    signals.push(1.0);
+    reason.push('email match');
+  }
+
+  // Final composite score — name is required baseline, other signals boost
+  const baseScore = nameScore;
+  const boostSignals = signals.slice(1).filter(s => s > 0.5);
+  const boost = boostSignals.length > 0
+    ? boostSignals.reduce((sum, s) => sum + s, 0) / boostSignals.length * 0.15
+    : 0;
+
+  const finalScore = Math.min(baseScore + boost, 1.0);
+  return { score: finalScore, reason: reason.join(', '), nameScore, meaningfulSim, fullSim };
 }
 
 async function findDuplicates(shopName, city, threshold = 0.85, excludeId) {
@@ -138,10 +277,10 @@ async function findDuplicates(shopName, city, threshold = 0.85, excludeId) {
   if (excludeId) { sql += ' AND id != $1'; params.push(excludeId); }
   const all = await queryAll(sql, params);
   const matches = [];
+  const source = { shop_name: shopName, city: city || null };
   for (const a of all) {
-    let score = similarity(shopName, a.shop_name);
-    if (city && a.city && similarity(city, a.city) > 0.8) score = Math.min(score + 0.05, 1);
-    if (score >= threshold) matches.push({ account: a, score });
+    const result = duplicateScore(source, { shop_name: a.shop_name, city: a.city, phone: a.phone, email: a.email, contact_names: a.contact_names });
+    if (result.score >= threshold) matches.push({ account: a, score: result.score, reason: result.reason });
   }
   return matches.sort((a, b) => b.score - a.score);
 }
@@ -2769,40 +2908,88 @@ async function startServer() {
     if (req.user.role !== 'admin' && req.user.role !== 'manager') return res.status(403).json({ error: 'Admin or manager only' });
     try {
       const threshold = parseFloat(req.body.threshold) || 0.95;
+      const scanMode = req.body.mode || 'all'; // 'lead_vs_active', 'active_vs_active', 'all'
       // Get all leads
       const leads = await queryAll(
-        "SELECT id, shop_name, city, phone, email, contact_names FROM accounts WHERE account_category = 'lead' AND deleted_at IS NULL ORDER BY shop_name"
+        "SELECT id, shop_name, city, phone, email, contact_names, account_category FROM accounts WHERE account_category = 'lead' AND deleted_at IS NULL ORDER BY shop_name"
       );
       // Get all active customers
       const actives = await queryAll(
-        "SELECT id, shop_name, city, phone, email, contact_names, pcr_managed, branch FROM accounts WHERE account_category = 'customer' AND deleted_at IS NULL ORDER BY shop_name"
+        "SELECT id, shop_name, city, phone, email, contact_names, pcr_managed, branch, account_category FROM accounts WHERE account_category = 'customer' AND deleted_at IS NULL ORDER BY shop_name"
       );
       const duplicates = [];
-      for (const lead of leads) {
-        for (const active of actives) {
-          const score = similarity(lead.shop_name, active.shop_name);
-          if (score >= threshold) {
-            // Check if already flagged
-            const existing = await queryOne(
-              'SELECT id FROM duplicate_flags WHERE ((account_1_id=$1 AND account_2_id=$2) OR (account_1_id=$2 AND account_2_id=$1)) AND status=$3',
-              [lead.id, active.id, 'pending']
+      const seen = new Set(); // prevent duplicate flag pairs
+
+      // Helper to process a pair — the account with more recent activity becomes the "keep" side
+      const processPair = async (acctA, acctB, pairType) => {
+        const pairKey = [Math.min(acctA.id, acctB.id), Math.max(acctA.id, acctB.id)].join('-');
+        if (seen.has(pairKey)) return;
+        seen.add(pairKey);
+
+        const result = duplicateScore(acctA, acctB);
+        if (result.score >= threshold) {
+          // Check if already flagged (any status)
+          const existing = await queryOne(
+            'SELECT id, status FROM duplicate_flags WHERE ((account_1_id=$1 AND account_2_id=$2) OR (account_1_id=$2 AND account_2_id=$1))',
+            [acctA.id, acctB.id]
+          );
+          if (!existing) {
+            // Determine which account has more recent activity (notes, activities)
+            const aLastActivity = await queryOne(
+              `SELECT GREATEST(
+                (SELECT MAX(created_at) FROM notes WHERE account_id = $1),
+                (SELECT MAX(created_at) FROM activities WHERE account_id = $1)
+              ) AS last_active`, [acctA.id]
             );
-            if (!existing) {
-              await execute(
-                'INSERT INTO duplicate_flags (account_1_id, account_2_id, similarity_score, status) VALUES ($1, $2, $3, $4)',
-                [lead.id, active.id, score, 'pending']
-              );
-            }
-            duplicates.push({
-              lead: { id: lead.id, shop_name: lead.shop_name, city: lead.city, phone: lead.phone, email: lead.email, contact_names: lead.contact_names },
-              active: { id: active.id, shop_name: active.shop_name, city: active.city, phone: active.phone, email: active.email, contact_names: active.contact_names, pcr_managed: active.pcr_managed, branch: active.branch },
-              score
-            });
+            const bLastActivity = await queryOne(
+              `SELECT GREATEST(
+                (SELECT MAX(created_at) FROM notes WHERE account_id = $1),
+                (SELECT MAX(created_at) FROM activities WHERE account_id = $1)
+              ) AS last_active`, [acctB.id]
+            );
+            // The more active account is account_2 (the "keep" side)
+            const aDate = aLastActivity?.last_active || '1970-01-01';
+            const bDate = bLastActivity?.last_active || '1970-01-01';
+            const [deleteAcct, keepAcct] = aDate > bDate ? [acctB, acctA] : [acctA, acctB];
+            await execute(
+              'INSERT INTO duplicate_flags (account_1_id, account_2_id, similarity_score, status) VALUES ($1, $2, $3, $4)',
+              [deleteAcct.id, keepAcct.id, result.score, 'pending']
+            );
+          } else if (existing.status === 'dismissed') {
+            // Don't re-flag dismissed pairs
+            return;
+          }
+          duplicates.push({
+            lead: { id: acctA.id, shop_name: acctA.shop_name, city: acctA.city, phone: acctA.phone, email: acctA.email, contact_names: acctA.contact_names, category: acctA.account_category },
+            active: { id: acctB.id, shop_name: acctB.shop_name, city: acctB.city, phone: acctB.phone, email: acctB.email, contact_names: acctB.contact_names, pcr_managed: acctB.pcr_managed, branch: acctB.branch, category: acctB.account_category },
+            score: result.score,
+            reason: result.reason,
+            nameScore: result.nameScore,
+            meaningfulSim: result.meaningfulSim,
+          });
+        }
+      };
+
+      // Lead vs Active scan
+      if (scanMode === 'lead_vs_active' || scanMode === 'all') {
+        for (const lead of leads) {
+          for (const active of actives) {
+            await processPair(lead, active, 'lead_vs_active');
           }
         }
       }
+
+      // Active vs Active scan (find same customer with multiple active accounts)
+      if (scanMode === 'active_vs_active' || scanMode === 'all') {
+        for (let i = 0; i < actives.length; i++) {
+          for (let j = i + 1; j < actives.length; j++) {
+            await processPair(actives[i], actives[j], 'active_vs_active');
+          }
+        }
+      }
+
       duplicates.sort((a, b) => b.score - a.score);
-      res.json({ success: true, count: duplicates.length, duplicates, leadsScanned: leads.length, activesScanned: actives.length });
+      res.json({ success: true, count: duplicates.length, duplicates, leadsScanned: leads.length, activesScanned: actives.length, mode: scanMode });
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
 
@@ -2813,10 +3000,20 @@ async function startServer() {
       const flags = await queryAll(`
         SELECT df.id, df.similarity_score, df.status, df.created_at,
           a1.id as lead_id, a1.shop_name as lead_name, a1.city as lead_city, a1.phone as lead_phone, a1.email as lead_email, a1.contact_names as lead_contacts,
+          a1.account_category as lead_category,
           a2.id as active_id, a2.shop_name as active_name, a2.city as active_city, a2.phone as active_phone, a2.email as active_email, a2.contact_names as active_contacts,
           a2.pcr_managed as active_pcr_managed, a2.branch as active_branch,
+          a2.account_category as active_category,
           (SELECT COUNT(*) FROM notes WHERE account_id = a1.id) as lead_note_count,
-          (SELECT COUNT(*) FROM notes WHERE account_id = a2.id) as active_note_count
+          (SELECT COUNT(*) FROM notes WHERE account_id = a2.id) as active_note_count,
+          GREATEST(
+            (SELECT MAX(created_at) FROM notes WHERE account_id = a1.id),
+            (SELECT MAX(created_at) FROM activities WHERE account_id = a1.id)
+          ) as lead_last_activity,
+          GREATEST(
+            (SELECT MAX(created_at) FROM notes WHERE account_id = a2.id),
+            (SELECT MAX(created_at) FROM activities WHERE account_id = a2.id)
+          ) as active_last_activity
         FROM duplicate_flags df
         JOIN accounts a1 ON df.account_1_id = a1.id
         JOIN accounts a2 ON df.account_2_id = a2.id

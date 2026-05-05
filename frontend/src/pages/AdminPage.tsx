@@ -73,8 +73,8 @@ export default function AdminPage({ user }: Props) {
   // Duplicate management state
   interface DuplicateFlag {
     id: number; similarity_score: number; status: string; created_at: string;
-    lead_id: number; lead_name: string; lead_city: string | null; lead_phone: string | null; lead_email: string | null; lead_contacts: string | null; lead_note_count: number;
-    active_id: number; active_name: string; active_city: string | null; active_phone: string | null; active_email: string | null; active_contacts: string | null; active_pcr_managed: boolean; active_branch: string | null; active_note_count: number;
+    lead_id: number; lead_name: string; lead_city: string | null; lead_phone: string | null; lead_email: string | null; lead_contacts: string | null; lead_note_count: number; lead_category?: string;
+    active_id: number; active_name: string; active_city: string | null; active_phone: string | null; active_email: string | null; active_contacts: string | null; active_pcr_managed: boolean; active_branch: string | null; active_note_count: number; active_category?: string;
   }
   const [duplicates, setDuplicates] = useState<DuplicateFlag[]>([]);
   const [dupeScanning, setDupeScanning] = useState(false);
@@ -82,6 +82,7 @@ export default function AdminPage({ user }: Props) {
   const [dupeLoading, setDupeLoading] = useState(false);
   const [dupeActionLoading, setDupeActionLoading] = useState<number | null>(null);
   const [dupeThreshold, setDupeThreshold] = useState('0.95');
+  const [dupeScanMode, setDupeScanMode] = useState<'all' | 'lead_vs_active' | 'active_vs_active'>('all');
   const [confirmDeleteId, setConfirmDeleteId] = useState<number | null>(null);
 
   const loadDuplicates = async () => {
@@ -97,8 +98,9 @@ export default function AdminPage({ user }: Props) {
     setDupeScanning(true);
     setDupeScanResult('');
     try {
-      const data = await api.post('/admin/scan-duplicates', { threshold: parseFloat(dupeThreshold) });
-      setDupeScanResult(`Scan complete: found ${data.count} duplicate(s) across ${data.leadsScanned} leads and ${data.activesScanned} active customers.`);
+      const data = await api.post('/admin/scan-duplicates', { threshold: parseFloat(dupeThreshold), mode: dupeScanMode });
+      const modeLabel = dupeScanMode === 'all' ? 'all accounts' : dupeScanMode === 'lead_vs_active' ? 'leads vs active customers' : 'active customers vs each other';
+      setDupeScanResult(`Scan complete: found ${data.count} duplicate(s) scanning ${modeLabel} (${data.leadsScanned} leads, ${data.activesScanned} active customers).`);
       await loadDuplicates();
     } catch (err: any) {
       setDupeScanResult(`Error: ${err.error || err.message || 'Scan failed'}`);
@@ -890,18 +892,28 @@ export default function AdminPage({ user }: Props) {
         <div className="space-y-6">
           {/* Scan Controls */}
           <div className="card">
-            <h2 className="font-bold text-navy-900 mb-1">Lead / Active Customer Duplicate Scanner</h2>
+            <h2 className="font-bold text-navy-900 mb-1">Smart Duplicate Scanner</h2>
             <p className="text-sm text-navy-500 mb-4">
-              Scans for Leads that match an Active Customer from PCR/AccountEdge. Matching leads can be reviewed and deleted, with notes transferred to the active file.
+              Uses multi-signal matching (business name, phone, city, contacts) to find real duplicates.
+              Filters out false positives from shared industry terms like "Collision Centre."
             </p>
-            <div className="flex flex-col sm:flex-row items-start sm:items-end gap-3 mb-4">
+            <div className="flex flex-col sm:flex-row items-start sm:items-end gap-3 mb-4 flex-wrap">
+              <div>
+                <label className="text-xs font-medium text-navy-600 block mb-1">Scan Mode</label>
+                <select value={dupeScanMode} onChange={e => setDupeScanMode(e.target.value as any)} className="input text-sm w-48">
+                  <option value="all">All (leads + actives)</option>
+                  <option value="lead_vs_active">Leads vs Active only</option>
+                  <option value="active_vs_active">Active vs Active only</option>
+                </select>
+              </div>
               <div>
                 <label className="text-xs font-medium text-navy-600 block mb-1">Match Threshold</label>
-                <select value={dupeThreshold} onChange={e => setDupeThreshold(e.target.value)} className="input text-sm w-32">
+                <select value={dupeThreshold} onChange={e => setDupeThreshold(e.target.value)} className="input text-sm w-36">
                   <option value="1.0">Exact (100%)</option>
                   <option value="0.95">Very High (95%)</option>
                   <option value="0.90">High (90%)</option>
                   <option value="0.85">Medium (85%)</option>
+                  <option value="0.75">Lower (75%)</option>
                 </select>
               </div>
               <button onClick={scanDuplicates} disabled={dupeScanning} className="btn-primary text-sm">
@@ -940,25 +952,36 @@ export default function AdminPage({ user }: Props) {
                     </div>
 
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
-                      {/* Lead */}
-                      <div className="bg-amber-50 border border-amber-200 rounded-lg p-3">
-                        <div className="flex items-center gap-2 mb-2">
-                          <span className="bg-amber-200 text-amber-800 text-xs font-bold px-2 py-0.5 rounded">LEAD</span>
-                          <span className="text-xs text-navy-400">(will be deleted)</span>
-                        </div>
-                        <p className="font-semibold text-navy-900">{d.lead_name}</p>
-                        {d.lead_city && <p className="text-xs text-navy-500 mt-0.5">{d.lead_city}</p>}
-                        {d.lead_phone && <p className="text-xs text-navy-500">{d.lead_phone}</p>}
-                        {d.lead_email && <p className="text-xs text-navy-500">{d.lead_email}</p>}
-                        {d.lead_contacts && <p className="text-xs text-navy-500">Contacts: {d.lead_contacts}</p>}
-                        <p className="text-xs mt-2 font-medium text-amber-700">{d.lead_note_count} note(s)</p>
-                        <a href={`/accounts/${d.lead_id}`} target="_blank" rel="noreferrer" className="text-xs text-blue-600 hover:underline mt-1 inline-block">View Lead →</a>
-                      </div>
+                      {/* Account A (lead or first active) */}
+                      {(() => {
+                        const isLead = d.lead_category === 'lead';
+                        const bgClass = isLead ? 'bg-amber-50 border-amber-200' : 'bg-blue-50 border-blue-200';
+                        const badgeClass = isLead ? 'bg-amber-200 text-amber-800' : 'bg-blue-200 text-blue-800';
+                        const noteClass = isLead ? 'text-amber-700' : 'text-blue-700';
+                        const label = isLead ? 'LEAD' : 'ACTIVE';
+                        return (
+                          <div className={`${bgClass} border rounded-lg p-3`}>
+                            <div className="flex items-center gap-2 mb-2">
+                              <span className={`${badgeClass} text-xs font-bold px-2 py-0.5 rounded`}>{label}</span>
+                              {isLead && <span className="text-xs text-navy-400">(will be deleted)</span>}
+                            </div>
+                            <p className="font-semibold text-navy-900">{d.lead_name}</p>
+                            {d.lead_city && <p className="text-xs text-navy-500 mt-0.5">{d.lead_city}</p>}
+                            {d.lead_phone && <p className="text-xs text-navy-500">{d.lead_phone}</p>}
+                            {d.lead_email && <p className="text-xs text-navy-500">{d.lead_email}</p>}
+                            {d.lead_contacts && <p className="text-xs text-navy-500">Contacts: {d.lead_contacts}</p>}
+                            <p className={`text-xs mt-2 font-medium ${noteClass}`}>{d.lead_note_count} note(s)</p>
+                            <a href={`/accounts/${d.lead_id}`} target="_blank" rel="noreferrer" className="text-xs text-blue-600 hover:underline mt-1 inline-block">View Account →</a>
+                          </div>
+                        );
+                      })()}
 
-                      {/* Active Customer */}
+                      {/* Account B (active or second active) */}
                       <div className="bg-green-50 border border-green-200 rounded-lg p-3">
                         <div className="flex items-center gap-2 mb-2">
-                          <span className="bg-green-200 text-green-800 text-xs font-bold px-2 py-0.5 rounded">ACTIVE (PCR)</span>
+                          <span className="bg-green-200 text-green-800 text-xs font-bold px-2 py-0.5 rounded">
+                            {d.active_pcr_managed ? 'ACTIVE (PCR)' : (d.active_category === 'customer' ? 'ACTIVE' : d.active_category?.toUpperCase() || 'ACTIVE')}
+                          </span>
                           <span className="text-xs text-navy-400">(will be kept)</span>
                         </div>
                         <p className="font-semibold text-navy-900">{d.active_name}</p>
@@ -968,23 +991,23 @@ export default function AdminPage({ user }: Props) {
                         {d.active_contacts && <p className="text-xs text-navy-500">Contacts: {d.active_contacts}</p>}
                         {d.active_branch && <p className="text-xs text-navy-500">Branch: {d.active_branch}</p>}
                         <p className="text-xs mt-2 font-medium text-green-700">{d.active_note_count} note(s)</p>
-                        <a href={`/accounts/${d.active_id}`} target="_blank" rel="noreferrer" className="text-xs text-blue-600 hover:underline mt-1 inline-block">View Active File →</a>
+                        <a href={`/accounts/${d.active_id}`} target="_blank" rel="noreferrer" className="text-xs text-blue-600 hover:underline mt-1 inline-block">View Account →</a>
                       </div>
                     </div>
 
                     {/* Actions */}
                     <div className="flex items-center gap-2 pt-2 border-t border-navy-100">
                       {confirmDeleteId === d.id ? (
-                        <div className="flex items-center gap-2 w-full">
+                        <div className="flex items-center gap-2 w-full flex-wrap">
                           <p className="text-xs text-red-700 font-medium flex-1">
-                            Confirm: Delete lead &quot;{d.lead_name}&quot; and transfer {d.lead_note_count} note(s) to active file?
+                            Confirm: Delete &quot;{d.lead_name}&quot; and transfer {d.lead_note_count} note(s) to &quot;{d.active_name}&quot;?
                           </p>
                           <button
                             onClick={() => deleteLead(d.id)}
                             disabled={dupeActionLoading === d.id}
                             className="px-3 py-1.5 text-xs font-semibold bg-red-600 text-white rounded-lg hover:bg-red-700 disabled:opacity-50"
                           >
-                            {dupeActionLoading === d.id ? 'Deleting...' : 'Yes, Delete Lead'}
+                            {dupeActionLoading === d.id ? 'Merging...' : 'Yes, Merge & Delete'}
                           </button>
                           <button onClick={() => setConfirmDeleteId(null)} className="px-3 py-1.5 text-xs text-navy-600 hover:text-navy-800">Cancel</button>
                         </div>
@@ -995,7 +1018,7 @@ export default function AdminPage({ user }: Props) {
                             disabled={dupeActionLoading === d.id}
                             className="px-3 py-1.5 text-xs font-semibold bg-red-100 text-red-700 rounded-lg hover:bg-red-200 disabled:opacity-50"
                           >
-                            Delete Lead & Transfer Notes
+                            Merge & Delete {d.lead_category === 'lead' ? 'Lead' : 'Duplicate'}
                           </button>
                           <button
                             onClick={() => dismissDuplicate(d.id)}

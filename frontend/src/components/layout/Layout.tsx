@@ -3,6 +3,7 @@ import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { User } from '../../types';
 import AISearchBar from '../search/AISearchBar';
 import NotificationBell from '../notifications/NotificationBell';
+import BodyShopWiz from '../BodyShopWiz';
 
 interface LayoutProps {
   user: User;
@@ -201,6 +202,9 @@ export default function Layout({ user, onLogout, children }: LayoutProps) {
           {children}
         </div>
       </main>
+
+      {/* Body Shop Wiz floating panel */}
+      <BodyShopWiz />
     </div>
   );
 }

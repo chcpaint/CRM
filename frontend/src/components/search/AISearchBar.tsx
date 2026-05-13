@@ -16,6 +16,8 @@ export default function AISearchBar({ onNavigate }: AISearchBarProps) {
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
   const wrapperRef = useRef<HTMLDivElement>(null);
   const toastTimeoutRef = useRef<any>(null);
+  // Race-condition guard: only apply results from the most recent search
+  const searchIdRef = useRef(0);
 
   const showToast = (message: string, type: 'success' | 'error' = 'success') => {
     setToast({ message, type });
@@ -66,24 +68,26 @@ export default function AISearchBar({ onNavigate }: AISearchBarProps) {
 
   const runSearch = async (q: string) => {
     if (!q.trim()) return;
+    const thisSearchId = ++searchIdRef.current;
     setIsSearching(true);
     setShowResults(true);
     try {
       const data = await api.post('/search', { query: q.trim() });
+      // Only apply results if this is still the latest search
+      if (thisSearchId !== searchIdRef.current) return;
       setResults(data.results || []);
       setResultType(data.type || 'accounts');
     } catch (err) {
+      if (thisSearchId !== searchIdRef.current) return;
       console.error('Search error:', err);
       setResults([]);
     } finally {
-      setIsSearching(false);
+      if (thisSearchId === searchIdRef.current) setIsSearching(false);
     }
   };
 
   const handleSearch = async () => {
     await runSearch(query);
-    // Clear query after executing
-    setTimeout(() => setQuery(''), 100);
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {

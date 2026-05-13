@@ -29,6 +29,50 @@ export default function AccountsPage({ user }: Props) {
   // Debounce timer ref for live search
   const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const prevSearchRef = useRef(search);
+  // Race-condition guard: only apply results from the most recent request
+  const loadIdRef = useRef(0);
+
+  // Stable load function that reads current state via refs to avoid stale closures
+  const searchRef = useRef(search);
+  searchRef.current = search;
+  const pageRef = useRef(page);
+  pageRef.current = page;
+  const categoryRef = useRef(category);
+  categoryRef.current = category;
+  const statusFilterRef = useRef(statusFilter);
+  statusFilterRef.current = statusFilter;
+  const branchFilterRef = useRef(branchFilter);
+  branchFilterRef.current = branchFilter;
+  const myAccountsOnlyRef = useRef(myAccountsOnly);
+  myAccountsOnlyRef.current = myAccountsOnly;
+
+  const loadAccounts = useCallback(async (overrides?: { search?: string; page?: number }) => {
+    const thisLoadId = ++loadIdRef.current;
+    setLoading(true);
+    try {
+      const params: Record<string, string> = {
+        page: (overrides?.page ?? pageRef.current).toString(),
+        limit: '25',
+        category: categoryRef.current
+      };
+      if (myAccountsOnlyRef.current) params.my_accounts = 'true';
+      if (statusFilterRef.current) params.status = statusFilterRef.current;
+      if (branchFilterRef.current) params.branch = branchFilterRef.current;
+      const s = overrides?.search ?? searchRef.current;
+      if (s) params.search = s;
+      const data = await api.get('/accounts', params);
+      // Only apply results if this is still the latest request
+      if (thisLoadId !== loadIdRef.current) return;
+      setAccounts(data.accounts);
+      setTotal(data.pagination.total);
+      setTotalPages(data.pagination.totalPages);
+    } catch (err) {
+      if (thisLoadId !== loadIdRef.current) return;
+      console.error('Failed to load accounts:', err);
+    } finally {
+      if (thisLoadId === loadIdRef.current) setLoading(false);
+    }
+  }, []);
 
   useEffect(() => {
     loadAccounts();
@@ -43,13 +87,13 @@ export default function AccountsPage({ user }: Props) {
     if (searchTimerRef.current) clearTimeout(searchTimerRef.current);
     searchTimerRef.current = setTimeout(() => {
       setPage(1);
-      loadAccounts();
+      loadAccounts({ search, page: 1 });
     }, 400);
 
     return () => {
       if (searchTimerRef.current) clearTimeout(searchTimerRef.current);
     };
-  }, [search]);
+  }, [search, loadAccounts]);
 
   // Respond to ?search= and ?category= from URL (voice nav, etc.)
   useEffect(() => {
@@ -58,37 +102,17 @@ export default function AccountsPage({ user }: Props) {
     if (urlSearch && urlSearch !== search) {
       setSearch(urlSearch);
       setPage(1);
-      // Trigger load after setting
-      setTimeout(() => loadAccounts(), 0);
+      loadAccounts({ search: urlSearch, page: 1 });
     }
     if (urlCategory && urlCategory !== category) {
       setCategory(urlCategory);
     }
   }, [searchParams]);
 
-  const loadAccounts = async () => {
-    setLoading(true);
-    try {
-      const params: Record<string, string> = { page: page.toString(), limit: '25', category };
-      if (myAccountsOnly) params.my_accounts = 'true';
-      if (statusFilter) params.status = statusFilter;
-      if (branchFilter) params.branch = branchFilter;
-      if (search) params.search = search;
-      const data = await api.get('/accounts', params);
-      setAccounts(data.accounts);
-      setTotal(data.pagination.total);
-      setTotalPages(data.pagination.totalPages);
-    } catch (err) {
-      console.error('Failed to load accounts:', err);
-    } finally {
-      setLoading(false);
-    }
-  };
-
   const handleSearch = (e: React.FormEvent) => {
     e.preventDefault();
     setPage(1);
-    loadAccounts();
+    loadAccounts({ search, page: 1 });
   };
 
   const switchCategory = (cat: 'lead' | 'customer') => {
@@ -182,7 +206,7 @@ export default function AccountsPage({ user }: Props) {
                 {search && (
                   <button
                     type="button"
-                    onClick={() => { setSearch(''); setPage(1); setTimeout(() => loadAccounts(), 0); }}
+                    onClick={() => { setSearch(''); setPage(1); loadAccounts({ search: '', page: 1 }); }}
                     className="absolute right-2 top-1/2 -translate-y-1/2 text-navy-400 hover:text-navy-600 text-lg leading-none"
                     title="Clear search"
                   >

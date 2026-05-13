@@ -615,11 +615,18 @@ async function startServer() {
       }
 
       const fields = ['shop_name','address','city','area','province','contact_names','phone','email','account_type','assigned_rep_id','status','suppliers','paint_line','allied_products','sundries','has_contract','mpo','num_techs','sq_footage','annual_revenue','former_sherwin_client','follow_up_date','tags','account_category','branch','postal_code','phone2','num_painters','num_body_men','num_paint_booths','cup_brand','paper_brand','filler_brand','contract_status','deal_details','banner','business_types','business_type_notes','contract_file_path','contract_expiration_date','secondary_rep_id','phone_numbers','email_addresses','pcr_managed','pcr_shop_name'];
+      // Fix double-encoded JSON entries: strings that should be objects
+      const fixJsonEncoding = (arr) => arr.map(item => {
+        if (typeof item === 'string') { try { return JSON.parse(item); } catch { return null; } }
+        return item;
+      }).filter(item => item && typeof item === 'object');
+
       // If phone_numbers is provided, auto-sync the primary number into `phone` for backward compat
       if (req.body.phone_numbers) {
         try {
-          const nums = typeof req.body.phone_numbers === 'string' ? JSON.parse(req.body.phone_numbers) : req.body.phone_numbers;
+          let nums = typeof req.body.phone_numbers === 'string' ? JSON.parse(req.body.phone_numbers) : req.body.phone_numbers;
           if (Array.isArray(nums)) {
+            nums = fixJsonEncoding(nums);
             const primary = nums.find(n => n.is_primary) || nums[0];
             if (primary) req.body.phone = primary.number;
             else req.body.phone = null;
@@ -630,8 +637,9 @@ async function startServer() {
       // If email_addresses is provided, auto-sync the primary email into `email` for backward compat
       if (req.body.email_addresses) {
         try {
-          const emails = typeof req.body.email_addresses === 'string' ? JSON.parse(req.body.email_addresses) : req.body.email_addresses;
+          let emails = typeof req.body.email_addresses === 'string' ? JSON.parse(req.body.email_addresses) : req.body.email_addresses;
           if (Array.isArray(emails)) {
+            emails = fixJsonEncoding(emails);
             const primary = emails.find(e => e.is_primary) || emails[0];
             if (primary) req.body.email = primary.address;
             else req.body.email = null;
@@ -3153,7 +3161,7 @@ async function startServer() {
         mergedFields.push('business_types');
       }
 
-      // Merge phone_numbers and email_addresses (JSON arrays)
+      // Merge phone_numbers and email_addresses (JSON arrays of objects)
       for (const arrayField of ['phone_numbers', 'email_addresses']) {
         let keepArr = [];
         let deleteArr = [];
@@ -3161,7 +3169,18 @@ async function startServer() {
         try { deleteArr = JSON.parse(deleteAcct[arrayField] || '[]'); } catch {}
         if (typeof keepAcct[arrayField] === 'object' && Array.isArray(keepAcct[arrayField])) keepArr = keepAcct[arrayField];
         if (typeof deleteAcct[arrayField] === 'object' && Array.isArray(deleteAcct[arrayField])) deleteArr = deleteAcct[arrayField];
-        const merged = [...new Set([...keepArr, ...deleteArr].map(v => typeof v === 'string' ? v.trim() : JSON.stringify(v)).filter(Boolean))];
+        // Fix any double-encoded entries (strings that are actually JSON objects)
+        const fixEncoding = (arr) => arr.map(item => {
+          if (typeof item === 'string') { try { return JSON.parse(item); } catch { return null; } }
+          return item;
+        }).filter(item => item && typeof item === 'object');
+        keepArr = fixEncoding(keepArr);
+        deleteArr = fixEncoding(deleteArr);
+        // Deduplicate by key field (number for phones, address for emails)
+        const keyField = arrayField === 'phone_numbers' ? 'number' : 'address';
+        const existingKeys = new Set(keepArr.map(v => (v[keyField] || '').toLowerCase().replace(/[^a-z0-9]/g, '')));
+        const newItems = deleteArr.filter(v => !existingKeys.has((v[keyField] || '').toLowerCase().replace(/[^a-z0-9]/g, '')));
+        const merged = [...keepArr, ...newItems];
         if (merged.length > keepArr.length) {
           updates.push(`${arrayField} = $${pi++}`);
           updateParams.push(JSON.stringify(merged));
@@ -4296,6 +4315,38 @@ async function startServer() {
       console.log(`  Active customers: ${customerCount.count} (controlled by PCR/AccountEdge)`);
     } catch (err) {
       console.error('  PCR sync warning:', err.message);
+    }
+
+    // One-time fix: repair double-encoded phone_numbers and email_addresses
+    try {
+      for (const field of ['phone_numbers', 'email_addresses']) {
+        // Find rows where the JSON array contains string elements (double-encoded)
+        const badRows = await queryAll(
+          `SELECT id, ${field} FROM accounts WHERE deleted_at IS NULL AND ${field} IS NOT NULL AND ${field}::text LIKE '%"{\\\\"number%' OR ${field}::text LIKE '%"{\\\\"address%'`
+        );
+        let fixed = 0;
+        for (const row of badRows) {
+          try {
+            let arr = typeof row[field] === 'string' ? JSON.parse(row[field]) : row[field];
+            if (!Array.isArray(arr)) continue;
+            let needsFix = false;
+            arr = arr.map(item => {
+              if (typeof item === 'string') {
+                needsFix = true;
+                try { return JSON.parse(item); } catch { return null; }
+              }
+              return item;
+            }).filter(item => item && typeof item === 'object');
+            if (needsFix && arr.length > 0) {
+              await execute(`UPDATE accounts SET ${field} = $1 WHERE id = $2`, [JSON.stringify(arr), row.id]);
+              fixed++;
+            }
+          } catch (e) { /* skip row */ }
+        }
+        if (fixed > 0) console.log(`  Fixed ${fixed} accounts with double-encoded ${field}`);
+      }
+    } catch (err) {
+      console.error('  Double-encoding fix warning:', err.message);
     }
   });
 }

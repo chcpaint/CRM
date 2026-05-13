@@ -21,26 +21,44 @@ export default function AccountDetailPage({ user }: Props) {
 
   const EMAIL_TYPES = ['', 'Painter', 'Admin', 'Manager', 'Owner'] as const;
 
-  // Parse phone_numbers JSON from account
+  // Parse phone_numbers JSON from account (handles double-encoded JSON)
   const parsePhoneNumbers = (acc: Account): PhoneEntry[] => {
     try {
       const raw = acc.phone_numbers;
       if (!raw) return acc.phone ? [{ number: acc.phone, label: 'Main', is_primary: true }] : [];
-      const arr = typeof raw === 'string' ? JSON.parse(raw) : raw;
-      if (Array.isArray(arr) && arr.length > 0) return arr;
+      let arr = typeof raw === 'string' ? JSON.parse(raw) : raw;
+      if (Array.isArray(arr) && arr.length > 0) {
+        // Fix double-encoded entries: strings that are actually JSON objects
+        arr = arr.map((item: any) => {
+          if (typeof item === 'string') {
+            try { return JSON.parse(item); } catch { return null; }
+          }
+          return item;
+        }).filter((item: any) => item && typeof item === 'object' && item.number);
+        if (arr.length > 0) return arr;
+      }
       return acc.phone ? [{ number: acc.phone, label: 'Main', is_primary: true }] : [];
     } catch {
       return acc.phone ? [{ number: acc.phone, label: 'Main', is_primary: true }] : [];
     }
   };
 
-  // Parse email_addresses JSON from account
+  // Parse email_addresses JSON from account (handles double-encoded JSON)
   const parseEmailAddresses = (acc: Account): EmailEntry[] => {
     try {
       const raw = acc.email_addresses;
       if (!raw) return acc.email ? [{ address: acc.email, type: '', is_primary: true }] : [];
-      const arr = typeof raw === 'string' ? JSON.parse(raw) : raw;
-      if (Array.isArray(arr) && arr.length > 0) return arr;
+      let arr = typeof raw === 'string' ? JSON.parse(raw) : raw;
+      if (Array.isArray(arr) && arr.length > 0) {
+        // Fix double-encoded entries: strings that are actually JSON objects
+        arr = arr.map((item: any) => {
+          if (typeof item === 'string') {
+            try { return JSON.parse(item); } catch { return null; }
+          }
+          return item;
+        }).filter((item: any) => item && typeof item === 'object' && item.address);
+        if (arr.length > 0) return arr;
+      }
       return acc.email ? [{ address: acc.email, type: '', is_primary: true }] : [];
     } catch {
       return acc.email ? [{ address: acc.email, type: '', is_primary: true }] : [];
@@ -770,12 +788,13 @@ export default function AccountDetailPage({ user }: Props) {
                   <div className="text-xs text-navy-500 font-semibold uppercase mb-2">Phone Numbers</div>
                   <div className="space-y-1.5">
                     {phones.map((ph, i) => {
-                      const clean = ph.number.replace(/[^\d+]/g, '');
+                      const num = ph?.number || '';
+                      const clean = num.replace(/[^\d+]/g, '');
                       return (
-                        <div key={i} className={`flex items-center gap-2 text-sm ${ph.is_primary ? 'font-medium text-navy-900' : 'text-navy-600'}`}>
-                          {ph.is_primary && <span className="text-green-600 text-xs font-bold bg-green-50 px-1.5 py-0.5 rounded">Main</span>}
-                          <a href={`tel:${clean}`} className="hover:text-brand-600 underline decoration-dotted">{ph.number}</a>
-                          {ph.label && <span className="text-navy-400 text-xs">({ph.label})</span>}
+                        <div key={i} className={`flex items-center gap-2 text-sm ${ph?.is_primary ? 'font-medium text-navy-900' : 'text-navy-600'}`}>
+                          {ph?.is_primary && <span className="text-green-600 text-xs font-bold bg-green-50 px-1.5 py-0.5 rounded">Main</span>}
+                          <a href={`tel:${clean}`} className="hover:text-brand-600 underline decoration-dotted">{num}</a>
+                          {ph?.label && <span className="text-navy-400 text-xs">({ph.label})</span>}
                           <a href={`sms:${clean}`} className="text-blue-500 hover:text-blue-700 text-xs ml-1" title="Text this number">Text</a>
                         </div>
                       );
@@ -793,10 +812,10 @@ export default function AccountDetailPage({ user }: Props) {
                   <div className="text-xs text-navy-500 font-semibold uppercase mb-2">Email Addresses</div>
                   <div className="space-y-1.5">
                     {emails.map((em, i) => (
-                      <div key={i} className={`flex items-center gap-2 text-sm ${em.is_primary ? 'font-medium text-navy-900' : 'text-navy-600'}`}>
-                        {em.is_primary && <span className="text-purple-600 text-xs font-bold bg-purple-50 px-1.5 py-0.5 rounded">Main</span>}
-                        <a href={`mailto:${em.address}`} className="hover:text-brand-600 underline decoration-dotted">{em.address}</a>
-                        {em.type && <span className="text-navy-400 text-xs bg-navy-50 px-1.5 py-0.5 rounded">{em.type}</span>}
+                      <div key={i} className={`flex items-center gap-2 text-sm ${em?.is_primary ? 'font-medium text-navy-900' : 'text-navy-600'}`}>
+                        {em?.is_primary && <span className="text-purple-600 text-xs font-bold bg-purple-50 px-1.5 py-0.5 rounded">Main</span>}
+                        <a href={`mailto:${em?.address || ''}`} className="hover:text-brand-600 underline decoration-dotted">{em?.address || ''}</a>
+                        {em?.type && <span className="text-navy-400 text-xs bg-navy-50 px-1.5 py-0.5 rounded">{em.type}</span>}
                       </div>
                     ))}
                   </div>

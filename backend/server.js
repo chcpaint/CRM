@@ -2626,6 +2626,17 @@ async function startServer() {
         `);
       } catch (cronErr) { console.warn('cron schedule skipped:', cronErr.message); }
 
+      // Ensure business-hours refresh cron exists — the Edge Function fetches fresh
+      // data to pcr_sync_data every 30 min but its RPC call to the refresh function
+      // always times out.  This cron runs the heavy refresh directly in Postgres
+      // where the 15-min statement_timeout works.
+      try {
+        await client.query(`
+          SELECT cron.schedule('refresh-sales-data-business-hours','0 10,14,18,22 * * 1-5','SELECT refresh_sales_data_from_pcr();')
+          WHERE NOT EXISTS (SELECT 1 FROM cron.job WHERE jobname='refresh-sales-data-business-hours')
+        `);
+      } catch (cronErr) { console.warn('business-hours cron schedule skipped:', cronErr.message); }
+
       // Also sync customers/shops from PCR so new shops show up immediately
       let customerSync = null;
       try {

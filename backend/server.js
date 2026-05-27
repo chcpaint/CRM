@@ -2701,13 +2701,16 @@ async function startServer() {
       throw new Error('Intranet returned non-array response');
     }
 
-    // 2. Flatten: each row's `data` is a JSON array of hold objects
+    // 2. Flatten: each row's `data` is a JSON array of hold objects.
+    //    Preserve the row-level `updated_at` so the CRM staleness check works.
     const allHolds = [];
     for (const row of intranetRows) {
       const arr = row.data;
       if (!Array.isArray(arr)) continue;
+      const rowUpdatedAt = row.updated_at || null;
       for (const entry of arr) {
         if (entry && typeof entry === 'object' && (entry.name || entry.customer_name)) {
+          entry._rowUpdatedAt = rowUpdatedAt;
           allHolds.push(entry);
         }
       }
@@ -2742,7 +2745,10 @@ async function startServer() {
       const isResolved = !!(h.resolutionMs || h.paidAt);
       const isActive = h.is_active !== undefined ? h.is_active
         : (h.status ? h.status !== 'resolved' && h.status !== 'removed' : !isResolved);
-      const intranetUpdatedAt = h.updated_at || h.last_updated || h.intranet_updated_at || null;
+      // Use NOW() for intranet_updated_at — we just fetched fresh data from the
+      // intranet, so the staleness check should reflect when we last synced.
+      // The intranet's row-level updated_at is TEXT and may not parse as TIMESTAMPTZ.
+      const intranetUpdatedAt = new Date().toISOString();
 
       // Try to match to a CRM account by name
       let accountId = null;

@@ -2660,15 +2660,17 @@ async function startServer() {
   // ============================================================================
   //  HOLDS SYNC FROM CHC INTRANET
   // ============================================================================
-  const INTRANET_URL = process.env.INTRANET_SUPABASE_URL || 'https://eijlxtplywjbilijlyzf.supabase.co';
-  const INTRANET_KEY = process.env.INTRANET_SUPABASE_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImVpamx4dHBseXdqYmlsaWpseXpmIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzMwODIyMDksImV4cCI6MjA4ODY1ODIwOX0.63EbmnL1UCGyczinq1NxuvCux4LwJDlwhMvD9rYr5rg';
+  // New intranet project (migrated ~April 2026). Old project eijlxtplywjbilijlyzf is decomissioned.
+  const INTRANET_URL = process.env.INTRANET_SUPABASE_URL || 'https://mqpagzjbfwknzeubecif.supabase.co';
+  const INTRANET_KEY = process.env.INTRANET_SUPABASE_KEY || 'sb_publishable_rcrI8XZherAuRWjvx-Lh2A_A8_b0zwY';
   const HOLDS_TABLE = process.env.INTRANET_HOLDS_TABLE || 'holds';
 
   async function syncHoldsFromIntranet() {
     console.log('[Holds Sync] Starting sync from CHC Intranet...');
     const startTime = Date.now();
 
-    // 1. Fetch holds from the intranet Supabase REST API
+    // 1. Fetch holds from the new intranet Supabase REST API
+    //    New schema: each row has { id, data (jsonb array of holds), updated_at }
     const url = `${INTRANET_URL}/rest/v1/${HOLDS_TABLE}?select=*`;
     const resp = await fetch(url, {
       headers: {
@@ -2683,36 +2685,55 @@ async function startServer() {
       throw new Error(`Intranet API returned ${resp.status}: ${errText}`);
     }
 
-    const intranetHolds = await resp.json();
-    if (!Array.isArray(intranetHolds)) {
+    const intranetRows = await resp.json();
+    if (!Array.isArray(intranetRows)) {
       throw new Error('Intranet returned non-array response');
     }
 
-    console.log(`[Holds Sync] Fetched ${intranetHolds.length} holds from intranet`);
+    // 2. Flatten: each row's `data` is a JSON array of hold objects
+    const allHolds = [];
+    for (const row of intranetRows) {
+      const arr = row.data;
+      if (!Array.isArray(arr)) continue;
+      for (const entry of arr) {
+        if (entry && typeof entry === 'object' && (entry.name || entry.customer_name)) {
+          allHolds.push(entry);
+        }
+      }
+    }
+
+    console.log(`[Holds Sync] Fetched ${intranetRows.length} rows → ${allHolds.length} holds from intranet`);
 
     let upserted = 0;
     let deactivated = 0;
     let matched = 0;
 
-    // 2. Upsert each hold into the CRM
-    for (const h of intranetHolds) {
-      // Determine the intranet ID (could be 'id', 'hold_id', etc.)
+    // 3. Upsert each hold into the CRM
+    for (const h of allHolds) {
+      // New intranet uses camelCase fields; support both old and new naming
       const intranetId = String(h.id || h.hold_id || h.intranet_id || '');
       if (!intranetId) continue;
 
-      const customerName = h.customer_name || h.name || h.shop_name || '';
+      const customerName = h.name || h.customer_name || h.shop_name || '';
       if (!customerName) continue;
 
       const branch = h.branch || h.location || null;
-      const reason = h.reason || h.hold_reason || h.notes || null;
-      const addedAt = h.added_at || h.created_at || h.date_added || null;
-      const addedBy = h.added_by || h.created_by || null;
+      // Combine reason with billing info if present (row 2 type: amount, period, paidBy, etc.)
+      let reason = h.reason || h.hold_reason || h.notes || null;
+      if (h.amount && !reason) {
+        reason = `Amount: $${h.amount}` + (h.period ? ` — Period: ${h.period}` : '');
+      }
+      const addedAt = h.addedAt || h.added_at || h.created_at || h.date_added || null;
+      const addedBy = h.addedBy || h.added_by || h.created_by || null;
       const updates = h.updates || h.hold_updates || '[]';
       const updatesJson = typeof updates === 'string' ? updates : JSON.stringify(updates);
-      const isActive = h.is_active !== undefined ? h.is_active : (h.status !== 'resolved' && h.status !== 'removed');
+      // If resolutionMs or paidAt exist, the hold has been resolved
+      const isResolved = !!(h.resolutionMs || h.paidAt);
+      const isActive = h.is_active !== undefined ? h.is_active
+        : (h.status ? h.status !== 'resolved' && h.status !== 'removed' : !isResolved);
       const intranetUpdatedAt = h.updated_at || h.last_updated || h.intranet_updated_at || null;
 
-      // Try to match to a CRM account by name (fuzzy)
+      // Try to match to a CRM account by name
       let accountId = null;
       const acct = await queryOne(
         `SELECT id FROM accounts
@@ -2747,9 +2768,9 @@ async function startServer() {
       upserted++;
     }
 
-    // 3. Mark holds as inactive if they're no longer in the intranet feed
-    if (intranetHolds.length > 0) {
-      const intranetIds = intranetHolds
+    // 4. Mark holds as inactive if they're no longer in the intranet feed
+    if (allHolds.length > 0) {
+      const intranetIds = allHolds
         .map(h => String(h.id || h.hold_id || h.intranet_id || ''))
         .filter(Boolean);
       if (intranetIds.length > 0) {

@@ -912,7 +912,7 @@ async function startServer() {
   // ─── SALES ROUTES ───
   app.get('/api/sales', authenticate, async (req, res) => {
     try {
-      const { month, rep_id, account_id, page = '1', limit = '50' } = req.query;
+      const { month, rep_id, account_id, page = '1', limit = '50', year } = req.query;
       const isRep = req.user.role === 'rep';
       const uid = req.user.userId;
       let where = []; let params = []; let idx = 1;
@@ -922,6 +922,13 @@ async function startServer() {
         where.push(`(s.rep_id = $${idx} OR LOWER(TRIM(s.salesperson)) = (SELECT LOWER(TRIM(first_name || ' ' || last_name)) FROM users WHERE id = $${idx}))`);
         params.push(uid);
         idx++;
+      }
+
+      // Server-side year filter — keeps response size manageable
+      if (year && year !== 'all') {
+        where.push(`s.sale_date >= $${idx} AND s.sale_date < $${idx + 1}`);
+        params.push(`${year}-01-01`, `${parseInt(year) + 1}-01-01`);
+        idx += 2;
       }
 
       if (month) { where.push(`s.month=$${idx++}`); params.push(month); }
@@ -935,8 +942,8 @@ async function startServer() {
 
       let sales;
       if (lim === 0) {
-        // limit=0 means fetch all records (no pagination)
-        sales = await queryAll(`SELECT s.*, a.shop_name, u.first_name as rep_first_name, u.last_name as rep_last_name FROM sales_data s LEFT JOIN accounts a ON s.account_id=a.id LEFT JOIN users u ON s.rep_id=u.id ${w} ORDER BY s.sale_date DESC`,
+        // limit=0 means fetch all matching records — cap at 50k for safety
+        sales = await queryAll(`SELECT s.*, a.shop_name, u.first_name as rep_first_name, u.last_name as rep_last_name FROM sales_data s LEFT JOIN accounts a ON s.account_id=a.id LEFT JOIN users u ON s.rep_id=u.id ${w} ORDER BY s.sale_date DESC LIMIT 50000`,
           params);
       } else {
         sales = await queryAll(`SELECT s.*, a.shop_name, u.first_name as rep_first_name, u.last_name as rep_last_name FROM sales_data s LEFT JOIN accounts a ON s.account_id=a.id LEFT JOIN users u ON s.rep_id=u.id ${w} ORDER BY s.sale_date DESC LIMIT $${idx++} OFFSET $${idx++}`,

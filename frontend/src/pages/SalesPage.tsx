@@ -26,7 +26,9 @@ export default function SalesPage({ user }: Props) {
   } | null>(null);
   const [revError, setRevError] = useState(false);
 
-  useEffect(() => { loadSales(); loadShopTargets(); }, []);
+  useEffect(() => { loadShopTargets(); }, []);
+  // Fetch sales when year filter changes (also handles initial load)
+  useEffect(() => { loadSales(filterYear); }, [filterYear]);
 
   // Handle ?customer= URL param (from voice navigation) — fuzzy match
   useEffect(() => {
@@ -99,10 +101,13 @@ export default function SalesPage({ user }: Props) {
     }
   }, [searchParams, sales, setSearchParams]);
 
-  const loadSales = async () => {
+  const loadSales = async (year?: string) => {
     try {
-      const data = await api.get('/sales', { limit: '0' });
-      setSales(data.sales);
+      setLoading(true);
+      const params: Record<string, string> = { limit: '0' };
+      if (year && year !== 'all') params.year = year;
+      const data = await api.get('/sales', params);
+      setSales(data.sales || []);
     } catch (err) {
       console.error(err);
     } finally {

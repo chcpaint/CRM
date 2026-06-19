@@ -65,8 +65,8 @@
 
   /* ─── Cards ─── */
   .card {
-    @apply bg-white rounded-2xl shadow-card border border-navy-100/80 p-6
-           hover:shadow-card-hover
+    @apply bg-white/85 backdrop-blur-lg rounded-2xl shadow-card border border-white/60 p-6
+           hover:shadow-card-hover hover:bg-white/95
            transition-all duration-300 ease-out;
   }
 
@@ -82,11 +82,35 @@
 
   /* ─── Glass morphism ─── */
   .glass {
-    @apply bg-white/70 backdrop-blur-md border border-white/20 shadow-glass;
+    @apply bg-white/70 backdrop-blur-xl border border-white/30 shadow-glass;
   }
 
   .glass-dark {
-    @apply bg-navy-900/80 backdrop-blur-md border border-white/10 shadow-glass;
+    @apply bg-navy-900/80 backdrop-blur-xl border border-white/10 shadow-glass;
+  }
+
+  /* Login card — frosted glass with depth */
+  .glass-card-login {
+    background: rgba(255, 255, 255, 0.92);
+    backdrop-filter: blur(24px) saturate(180%);
+    -webkit-backdrop-filter: blur(24px) saturate(180%);
+    border: 1px solid rgba(255, 255, 255, 0.3);
+    box-shadow:
+      0 8px 32px rgba(13, 27, 42, 0.2),
+      0 0 0 1px rgba(255, 255, 255, 0.1) inset,
+      0 1px 0 rgba(255, 255, 255, 0.5) inset;
+  }
+
+  /* Elevated glass card — for featured widgets */
+  .glass-elevated {
+    background: rgba(255, 255, 255, 0.75);
+    backdrop-filter: blur(20px) saturate(180%);
+    -webkit-backdrop-filter: blur(20px) saturate(180%);
+    border: 1px solid rgba(255, 255, 255, 0.4);
+    border-radius: 1rem;
+    box-shadow:
+      0 4px 24px rgba(13, 27, 42, 0.12),
+      0 1px 0 rgba(255, 255, 255, 0.6) inset;
   }
 
   /* ─── Page transitions ─── */

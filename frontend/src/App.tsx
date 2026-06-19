@@ -59,14 +59,17 @@ export default function App() {
     return (
       <div className="h-screen flex items-center justify-center bg-hero-gradient relative overflow-hidden">
         <div className="absolute inset-0 pointer-events-none">
-          <div className="absolute -top-40 -right-40 w-80 h-80 rounded-full bg-brand-600/10 blur-3xl animate-float" />
+          <div className="absolute -top-40 -right-40 w-96 h-96 rounded-full bg-brand-600/15 blur-3xl animate-float" />
+          <div className="absolute -bottom-40 -left-40 w-[500px] h-[500px] rounded-full bg-brand-500/10 blur-3xl animate-float" style={{ animationDelay: '3s' }} />
         </div>
         <div className="text-center relative z-10 animate-fade-in">
-          <div className="w-14 h-14 bg-brand-gradient rounded-2xl flex items-center justify-center mx-auto mb-4 shadow-glow-red animate-pulse-soft">
-            <span className="text-white font-bold text-xl">C</span>
-          </div>
-          <div className="w-10 h-10 border-3 border-brand-400 border-t-transparent rounded-full animate-spin mx-auto mb-4"></div>
-          <p className="text-navy-300 font-semibold tracking-wide text-sm">Loading CHC CRM...</p>
+          <img
+            src="/chc-logo.png"
+            alt="CHC Paint & Body Shop Supplies"
+            className="h-20 mx-auto mb-6 animate-pulse-soft drop-shadow-[0_4px_24px_rgba(230,57,70,0.3)]"
+          />
+          <div className="w-8 h-8 border-3 border-brand-400 border-t-transparent rounded-full animate-spin mx-auto mb-4"></div>
+          <p className="text-navy-300 font-semibold tracking-widest text-xs uppercase">Loading CRM...</p>
         </div>
       </div>
     );

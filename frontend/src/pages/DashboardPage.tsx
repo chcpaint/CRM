@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import { api } from '../services/api';
 import { User, DashboardMetrics, STATUS_LABELS, STATUS_COLORS } from '../types';
 import DailyDigest from '../components/dashboard/DailyDigest';
+import DailyQuote from '../components/dashboard/DailyQuote';
 import MessagesForYouCard from '../components/notifications/MessagesForYouCard';
 
 interface Props { user: User }
@@ -109,6 +110,9 @@ export default function DashboardPage({ user }: Props) {
         </div>
       </div>
 
+      {/* Daily motivational quote / fun fact */}
+      <DailyQuote />
+
       {/* Daily Report — shows on open, dismissable */}
       <DailyDigest user={user} />
 
@@ -118,25 +122,25 @@ export default function DashboardPage({ user }: Props) {
       </div>
 
       {/* KPI Cards */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 sm:gap-4 mb-6 sm:mb-8">
-        <div className="card !p-4 sm:!p-6">
-          <div className="text-xs sm:text-sm text-navy-500 mb-1">Active Accounts</div>
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 sm:gap-4 mb-6 sm:mb-8 stagger-children">
+        <div className="card !p-4 sm:!p-6 group hover:scale-[1.02]">
+          <div className="text-xs sm:text-sm text-navy-500 mb-1 font-medium">Active Accounts</div>
           <div className="text-xl sm:text-2xl font-bold text-navy-900">{activeAccounts}</div>
           <div className="text-[10px] sm:text-xs text-navy-400 mt-1">Status = Active</div>
         </div>
-        <div className="card !p-4 sm:!p-6">
-          <div className="text-xs sm:text-sm text-navy-500 mb-1">No Activity for 30 days</div>
+        <div className="card !p-4 sm:!p-6 group hover:scale-[1.02]">
+          <div className="text-xs sm:text-sm text-navy-500 mb-1 font-medium">No Activity for 30 days</div>
           <div className="text-xl sm:text-2xl font-bold text-brand-600">{metrics.dormantCount}</div>
           <div className="text-[10px] sm:text-xs text-navy-400 mt-1">Active accounts with no note or activity in 30+ days</div>
         </div>
-        <div className="card !p-4 sm:!p-6">
-          <div className="text-xs sm:text-sm text-navy-500 mb-1">This Month</div>
+        <div className="card !p-4 sm:!p-6 group hover:scale-[1.02]">
+          <div className="text-xs sm:text-sm text-navy-500 mb-1 font-medium">This Month</div>
           <div className="text-lg sm:text-2xl font-bold text-green-600">
             {fmtMoney(currentMonth?.total || 0)}
           </div>
         </div>
-        <div className="card !p-4 sm:!p-6">
-          <div className="text-xs sm:text-sm text-navy-500 mb-1">YTD Sales</div>
+        <div className="card !p-4 sm:!p-6 group hover:scale-[1.02]">
+          <div className="text-xs sm:text-sm text-navy-500 mb-1 font-medium">YTD Sales</div>
           <div className="text-lg sm:text-2xl font-bold text-navy-900">
             {fmtMoney(ytdRevenue)}
           </div>

@@ -49,7 +49,7 @@ export default function Layout({ user, onLogout, children }: LayoutProps) {
   return (
     <div className="min-h-screen">
       {/* Top navbar */}
-      <header className="bg-navy-900 text-white shadow-lg fixed top-0 left-0 right-0 z-50">
+      <header className="bg-navy-900/95 backdrop-blur-xl text-white shadow-[0_4px_30px_rgba(0,0,0,0.3)] fixed top-0 left-0 right-0 z-50 border-b border-white/[0.06]">
         <div className="flex items-center justify-between px-3 sm:px-4 h-14 sm:h-16 gap-2">
           <div className="flex items-center gap-2 flex-shrink-0">
             {/* Mobile hamburger */}
@@ -62,13 +62,15 @@ export default function Layout({ user, onLogout, children }: LayoutProps) {
               </svg>
             </button>
             {/* Logo */}
-            <Link to="/" className="flex items-center gap-2">
-              <div className="w-7 h-7 sm:w-8 sm:h-8 bg-brand-500 rounded-lg flex items-center justify-center font-bold text-xs sm:text-sm flex-shrink-0">
-                C
-              </div>
+            <Link to="/" className="flex items-center gap-2.5 group">
+              <img
+                src="/chc-logo.png"
+                alt="CHC"
+                className="h-8 sm:h-9 flex-shrink-0 drop-shadow-[0_2px_8px_rgba(230,57,70,0.25)] group-hover:drop-shadow-[0_2px_12px_rgba(230,57,70,0.4)] transition-all duration-300"
+              />
               <div className="hidden sm:block">
-                <div className="font-bold text-lg leading-tight">CRM</div>
-                <div className="text-[10px] text-navy-300 leading-tight">CHC Paint & Auto Body Supplies</div>
+                <div className="font-bold text-lg leading-tight tracking-tight">CRM</div>
+                <div className="text-[10px] text-navy-300 leading-tight tracking-wide">Paint & Auto Body Supplies</div>
               </div>
             </Link>
           </div>
@@ -105,7 +107,7 @@ export default function Layout({ user, onLogout, children }: LayoutProps) {
 
       {/* Sidebar */}
       <aside
-        className={`fixed top-14 sm:top-16 left-0 bottom-0 w-56 bg-white border-r border-navy-100 z-40 transform transition-transform duration-200 ease-in-out
+        className={`fixed top-14 sm:top-16 left-0 bottom-0 w-56 bg-white/80 backdrop-blur-xl border-r border-navy-100/50 z-40 transform transition-transform duration-300 ease-out
           ${sidebarOpen ? 'translate-x-0' : '-translate-x-full'} lg:translate-x-0`}
       >
         <nav className="p-4 space-y-1">
@@ -114,10 +116,10 @@ export default function Layout({ user, onLogout, children }: LayoutProps) {
               key={item.path}
               to={item.path}
               onClick={() => setSidebarOpen(false)}
-              className={`flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors
+              className={`flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium transition-all duration-200
                 ${isActive(item.path)
-                  ? 'bg-brand-50 text-brand-700'
-                  : 'text-navy-600 hover:bg-navy-50 hover:text-navy-900'
+                  ? 'bg-brand-50/80 text-brand-700 shadow-sm border border-brand-100/50'
+                  : 'text-navy-600 hover:bg-white/60 hover:text-navy-900 hover:shadow-sm'
                 }`}
             >
               <span className="text-lg">{item.icon}</span>
@@ -134,7 +136,7 @@ export default function Layout({ user, onLogout, children }: LayoutProps) {
       </aside>
 
       {/* Mobile bottom navigation — 4 primary + More */}
-      <nav className="lg:hidden fixed bottom-0 left-0 right-0 z-50 bg-white border-t border-navy-200 shadow-[0_-2px_10px_rgba(0,0,0,0.1)]">
+      <nav className="lg:hidden fixed bottom-0 left-0 right-0 z-50 bg-white/90 backdrop-blur-xl border-t border-navy-200/50 shadow-[0_-4px_20px_rgba(0,0,0,0.08)]">
         <div className="flex items-center justify-around px-1">
           {primaryNav.map((item) => (
             <Link

@@ -31,23 +31,30 @@ export default function LoginPage({ onLogin }: LoginPageProps) {
     <div className="min-h-screen bg-hero-gradient flex items-center justify-center px-4 relative overflow-hidden">
       {/* Animated background accents */}
       <div className="absolute inset-0 overflow-hidden pointer-events-none">
-        <div className="absolute -top-40 -right-40 w-80 h-80 rounded-full bg-brand-600/10 blur-3xl animate-float" />
-        <div className="absolute -bottom-40 -left-40 w-96 h-96 rounded-full bg-brand-500/8 blur-3xl animate-float" style={{ animationDelay: '3s' }} />
-        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[600px] h-[600px] rounded-full bg-navy-700/30 blur-3xl" />
+        <div className="absolute -top-40 -right-40 w-96 h-96 rounded-full bg-brand-600/15 blur-3xl animate-float" />
+        <div className="absolute -bottom-40 -left-40 w-[500px] h-[500px] rounded-full bg-brand-500/10 blur-3xl animate-float" style={{ animationDelay: '3s' }} />
+        <div className="absolute top-1/3 left-1/4 w-72 h-72 rounded-full bg-brand-400/8 blur-3xl animate-float" style={{ animationDelay: '5s' }} />
+        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[700px] h-[700px] rounded-full bg-navy-700/30 blur-3xl" />
+        {/* Subtle grid pattern */}
+        <div className="absolute inset-0 opacity-[0.03]" style={{ backgroundImage: 'radial-gradient(circle, rgba(255,255,255,0.8) 1px, transparent 1px)', backgroundSize: '32px 32px' }} />
       </div>
 
       <div className="w-full max-w-md relative z-10 animate-fade-in-up">
         {/* Logo area */}
         <div className="text-center mb-8">
-          <div className="inline-flex items-center justify-center w-16 h-16 bg-brand-gradient rounded-2xl mb-4 shadow-glow-red animate-float glossy-hover">
-            <span className="text-white font-bold text-2xl">C</span>
+          <div className="inline-block mb-5 animate-float">
+            <img
+              src="/chc-logo.png"
+              alt="CHC Paint & Body Shop Supplies"
+              className="h-24 sm:h-28 mx-auto drop-shadow-[0_4px_24px_rgba(230,57,70,0.3)]"
+            />
           </div>
-          <h1 className="text-3xl font-bold text-white tracking-tight">CHC CRM</h1>
-          <p className="text-navy-300 mt-2 tracking-wide text-sm uppercase">Paint & Auto Body Supplies</p>
+          <h1 className="text-3xl font-bold text-white tracking-tight">Customer Relationship Manager</h1>
+          <p className="text-navy-300 mt-2 tracking-widest text-xs uppercase font-medium">Enterprise Sales Platform</p>
         </div>
 
         {/* Login form — glass card */}
-        <div className="bg-white/95 backdrop-blur-xl rounded-3xl shadow-glass p-8 border border-white/20">
+        <div className="glass-card-login rounded-3xl p-8">
           <h2 className="text-xl font-bold text-navy-900 mb-6">Sign in to your account</h2>
 
           <form onSubmit={handleSubmit} className="space-y-5">

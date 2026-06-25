@@ -666,8 +666,14 @@ async function startServer() {
   });
 
   app.delete('/api/accounts/:id', authenticate, async (req, res) => {
+    // Only admins and managers can delete accounts
+    if (req.user.role !== 'admin' && req.user.role !== 'manager') {
+      return res.status(403).json({ error: 'Only admins and managers can delete accounts' });
+    }
+    const acct = await queryOne('SELECT id, shop_name FROM accounts WHERE id = $1', [req.params.id]);
+    if (!acct) return res.status(404).json({ error: 'Account not found' });
     await execute('UPDATE accounts SET deleted_at = NOW() WHERE id = $1', [req.params.id]);
-    await logAudit(req, 'account', parseInt(req.params.id), 'delete', {});
+    await logAudit(req, 'account', parseInt(req.params.id), 'delete', { shop_name: acct.shop_name });
     res.json({ message: 'Deleted' });
   });
 

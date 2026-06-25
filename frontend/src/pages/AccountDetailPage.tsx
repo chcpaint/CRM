@@ -98,6 +98,9 @@ export default function AccountDetailPage({ user }: Props) {
   const [pcrWarning, setPcrWarning] = useState<string | null>(null);
   // Save error feedback
   const [saveError, setSaveError] = useState<string | null>(null);
+  // Delete account
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   // Note transfer
   const [activeMatch, setActiveMatch] = useState<{id: number; shop_name: string; branch: string | null; pcr_managed: boolean} | null>(null);
   const [transferring, setTransferring] = useState(false);
@@ -406,6 +409,18 @@ export default function AccountDetailPage({ user }: Props) {
         setSaveError(msg);
         console.error('Save error:', err);
       }
+    }
+  };
+
+  const deleteAccount = async () => {
+    setDeleting(true);
+    try {
+      await api.delete(`/accounts/${id}`);
+      navigate('/accounts');
+    } catch (err: any) {
+      setSaveError(err?.message || err?.error || 'Failed to delete account');
+      setShowDeleteConfirm(false);
+      setDeleting(false);
     }
   };
 
@@ -768,8 +783,16 @@ export default function AccountDetailPage({ user }: Props) {
                 <button onClick={() => setSaveError(null)} className="text-red-400 hover:text-red-600">&times;</button>
               </div>
             )}
-            <div>
+            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
               <button onClick={saveEdit} className="btn-primary w-full sm:w-auto">Save Changes</button>
+              {(user.role === 'admin' || user.role === 'manager') && (
+                <button
+                  onClick={() => setShowDeleteConfirm(true)}
+                  className="text-sm text-red-500 hover:text-red-700 hover:bg-red-50 px-4 py-2 rounded-xl transition-colors border border-transparent hover:border-red-200"
+                >
+                  Delete Account
+                </button>
+              )}
             </div>
           </div>
         ) : (
@@ -1441,6 +1464,50 @@ export default function AccountDetailPage({ user }: Props) {
           </div>
         </div>
       </div>
+
+      {/* ═══ DELETE CONFIRMATION MODAL ═══ */}
+      {showDeleteConfirm && (
+        <>
+          <div className="fixed inset-0 bg-black/50 z-50" onClick={() => !deleting && setShowDeleteConfirm(false)} />
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+            <div className="bg-white rounded-2xl shadow-2xl max-w-md w-full p-6 animate-fade-in">
+              <div className="flex items-center gap-3 mb-4">
+                <div className="w-12 h-12 rounded-full bg-red-100 flex items-center justify-center flex-shrink-0">
+                  <svg className="w-6 h-6 text-red-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                  </svg>
+                </div>
+                <div>
+                  <h3 className="text-lg font-bold text-navy-900">Delete Account</h3>
+                  <p className="text-sm text-navy-500">This action cannot be easily undone</p>
+                </div>
+              </div>
+              <div className="bg-red-50 border border-red-200 rounded-xl p-4 mb-5">
+                <p className="text-sm text-red-800">
+                  Are you sure you want to delete <span className="font-bold">{account.shop_name}</span>?
+                  All notes, activities, and follow-ups associated with this account will no longer be accessible.
+                </p>
+              </div>
+              <div className="flex gap-3">
+                <button
+                  onClick={() => setShowDeleteConfirm(false)}
+                  disabled={deleting}
+                  className="btn-secondary flex-1"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={deleteAccount}
+                  disabled={deleting}
+                  className="flex-1 bg-red-600 text-white px-5 py-2.5 rounded-xl font-semibold hover:bg-red-700 active:scale-[0.98] transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {deleting ? 'Deleting...' : 'Yes, Delete'}
+                </button>
+              </div>
+            </div>
+          </div>
+        </>
+      )}
     </div>
   );
 }

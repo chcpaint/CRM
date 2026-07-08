@@ -47,9 +47,30 @@ function dateWindowRange(w: DateWindow): { start: number; end: number } {
   }
 }
 
+interface SyncStatus {
+  sync_type: string;
+  status: string;
+  last_run: string;
+  records: number;
+  error: string | null;
+  consecutive_failures: number;
+  last_success: string | null;
+  hours_since_sync: number | null;
+  stale: boolean;
+}
+
+interface SyncHealth {
+  syncs: SyncStatus[];
+  overall_healthy: boolean;
+  branch_revenue: { last_synced: string; latest_month: string; months_covered: number };
+  pcr_data: { last_synced: string; intranet_uploaded_at: string; uploaded_by: string };
+}
+
 export default function DashboardPage({ user }: Props) {
   const [metrics, setMetrics] = useState<DashboardMetrics | null>(null);
   const [loading, setLoading] = useState(true);
+  const [syncHealth, setSyncHealth] = useState<SyncHealth | null>(null);
+  const [showSyncDetails, setShowSyncDetails] = useState(false);
   // Track which salesperson groups are expanded in the Recent Activity card.
   // Collapsed by default — users click a rep's row to see their entries.
   const [expandedReps, setExpandedReps] = useState<Set<string>>(new Set());
@@ -64,6 +85,10 @@ export default function DashboardPage({ user }: Props) {
 
   useEffect(() => {
     loadMetrics();
+    // Load sync health for admins/managers
+    if (user.role === 'admin' || user.role === 'manager') {
+      loadSyncHealth();
+    }
   }, []);
 
   const loadMetrics = async () => {
@@ -74,6 +99,16 @@ export default function DashboardPage({ user }: Props) {
       console.error('Failed to load metrics:', err);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const loadSyncHealth = async () => {
+    try {
+      const data = await api.get('/sync/health');
+      setSyncHealth(data);
+    } catch (err) {
+      // Non-critical — don't block dashboard
+      console.error('Failed to load sync health:', err);
     }
   };
 
@@ -90,7 +125,11 @@ export default function DashboardPage({ user }: Props) {
   const ytdRevenue = metrics.monthlyRevenue
     .filter((m) => typeof m.month === 'string' && m.month.startsWith(currentYear))
     .reduce((sum, m) => sum + (m.total || 0), 0);
-  const currentMonth = metrics.monthlyRevenue[metrics.monthlyRevenue.length - 1];
+  // Find the actual current calendar month instead of blindly taking the last array element.
+  // This prevents the dashboard from showing stale data when a new month starts.
+  const now = new Date();
+  const currentMonthKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+  const currentMonth = metrics.monthlyRevenue.find((m) => m.month === currentMonthKey) || { month: currentMonthKey, total: 0, count: 0 };
 
   // Show ACTIVE accounts on the KPI card (previously showed every row including cold / DNC / churned,
   // which inflated the number past 1,800 and misrepresented the book of business).
@@ -109,6 +148,61 @@ export default function DashboardPage({ user }: Props) {
           <p className="text-navy-500 text-xs sm:text-sm mt-1">Welcome back, {user.first_name}</p>
         </div>
       </div>
+
+      {/* Sync Health Alert — only visible to admin/manager when sync is unhealthy */}
+      {syncHealth && !syncHealth.overall_healthy && (user.role === 'admin' || user.role === 'manager') && (
+        <div className="mb-4 sm:mb-6 rounded-lg border border-red-200 bg-red-50 p-4">
+          <div className="flex items-start justify-between gap-3">
+            <div className="flex items-center gap-2">
+              <span className="text-red-600 text-lg">&#9888;</span>
+              <div>
+                <h3 className="text-sm font-semibold text-red-800">Data Sync Issue Detected</h3>
+                <p className="text-xs text-red-600 mt-0.5">
+                  {syncHealth.syncs.filter(s => s.consecutive_failures >= 3).length > 0
+                    ? `${syncHealth.syncs.filter(s => s.consecutive_failures >= 3).map(s => s.sync_type).join(', ')} — consecutive failures detected`
+                    : syncHealth.syncs.filter(s => s.stale).length > 0
+                    ? `${syncHealth.syncs.filter(s => s.stale).map(s => s.sync_type).join(', ')} — no sync in 24+ hours`
+                    : 'One or more data syncs may not be running correctly.'}
+                </p>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => setShowSyncDetails(!showSyncDetails)}
+              className="text-xs text-red-700 underline hover:text-red-900 flex-shrink-0"
+            >
+              {showSyncDetails ? 'Hide details' : 'Show details'}
+            </button>
+          </div>
+          {showSyncDetails && (
+            <div className="mt-3 space-y-2">
+              {syncHealth.syncs.map(s => (
+                <div key={s.sync_type} className={`flex items-center justify-between text-xs p-2 rounded ${
+                  s.consecutive_failures >= 3 ? 'bg-red-100 text-red-800' :
+                  s.stale ? 'bg-yellow-100 text-yellow-800' :
+                  'bg-green-100 text-green-800'
+                }`}>
+                  <div>
+                    <span className="font-medium">{s.sync_type}</span>
+                    {s.error && <span className="ml-2 text-red-600">— {s.error.slice(0, 80)}</span>}
+                  </div>
+                  <div className="text-right flex-shrink-0 ml-2">
+                    {s.last_run
+                      ? `Last run: ${new Date(s.last_run).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}`
+                      : 'Never run'}
+                    {s.consecutive_failures > 0 && ` (${s.consecutive_failures} failures)`}
+                  </div>
+                </div>
+              ))}
+              <div className="text-[10px] text-red-500 mt-1">
+                Revenue data: last synced {syncHealth.branch_revenue?.last_synced
+                  ? new Date(syncHealth.branch_revenue.last_synced).toLocaleString()
+                  : 'never'}, latest month: {syncHealth.branch_revenue?.latest_month || 'N/A'}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Daily motivational quote / fun fact */}
       <DailyQuote />

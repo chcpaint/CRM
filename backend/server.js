@@ -2346,6 +2346,106 @@ async function startServer() {
     }
   });
 
+  // ─── SYNC HEALTH CHECK (admin-visible) ───
+  // Returns sync status for each sync type so the frontend can show a warning banner
+  // when syncs have been failing. Checks pcr_sync_log for recent errors and staleness.
+  app.get('/api/sync/health', authenticate, async (req, res) => {
+    try {
+      // Only admins and managers can see sync health
+      if (req.user.role !== 'admin' && req.user.role !== 'manager') {
+        return res.status(403).json({ error: 'Admin or manager access required' });
+      }
+
+      // Get the most recent log entry for each sync type
+      const latestSyncs = await queryAll(`
+        SELECT DISTINCT ON (sync_type)
+          sync_type,
+          status,
+          records_synced,
+          error_message,
+          created_at
+        FROM pcr_sync_log
+        ORDER BY sync_type, created_at DESC
+      `);
+
+      // Count consecutive failures per sync type (how many errors since last success)
+      const failStreaks = await queryAll(`
+        WITH ranked AS (
+          SELECT sync_type, status, created_at,
+                 ROW_NUMBER() OVER (PARTITION BY sync_type ORDER BY created_at DESC) as rn
+          FROM pcr_sync_log
+        ),
+        last_success AS (
+          SELECT sync_type, MAX(created_at) as last_success_at
+          FROM pcr_sync_log WHERE status = 'success'
+          GROUP BY sync_type
+        )
+        SELECT r.sync_type,
+               COUNT(*) FILTER (WHERE r.status = 'error' AND (r.created_at > ls.last_success_at OR ls.last_success_at IS NULL)) as consecutive_failures,
+               ls.last_success_at
+        FROM ranked r
+        LEFT JOIN last_success ls ON ls.sync_type = r.sync_type
+        WHERE r.rn <= 50
+        GROUP BY r.sync_type, ls.last_success_at
+      `);
+
+      // Check branch_daily_revenue freshness
+      const branchFreshness = await queryOne(`
+        SELECT MAX(synced_at) as last_synced,
+               MAX(month) as latest_month,
+               COUNT(DISTINCT month) as months_covered
+        FROM branch_daily_revenue
+      `);
+
+      // Check pcr_sync_data freshness
+      const pcrFreshness = await queryOne(`
+        SELECT synced_at, intranet_uploaded_at, uploaded_by
+        FROM pcr_sync_data WHERE id = 1
+      `);
+
+      const syncHealth = {
+        syncs: latestSyncs.map(s => {
+          const streak = failStreaks.find(f => f.sync_type === s.sync_type);
+          const hoursSinceSync = s.created_at
+            ? (Date.now() - new Date(s.created_at).getTime()) / (1000 * 60 * 60)
+            : null;
+          return {
+            sync_type: s.sync_type,
+            status: s.status,
+            last_run: s.created_at,
+            records: s.records_synced,
+            error: s.error_message,
+            consecutive_failures: parseInt(streak?.consecutive_failures) || 0,
+            last_success: streak?.last_success_at || null,
+            hours_since_sync: hoursSinceSync ? Math.round(hoursSinceSync * 10) / 10 : null,
+            stale: hoursSinceSync > 24  // flag if no sync in 24+ hours
+          };
+        }),
+        branch_revenue: {
+          last_synced: branchFreshness?.last_synced,
+          latest_month: branchFreshness?.latest_month,
+          months_covered: parseInt(branchFreshness?.months_covered) || 0
+        },
+        pcr_data: {
+          last_synced: pcrFreshness?.synced_at,
+          intranet_uploaded_at: pcrFreshness?.intranet_uploaded_at,
+          uploaded_by: pcrFreshness?.uploaded_by
+        },
+        overall_healthy: true  // set below
+      };
+
+      // Determine overall health
+      const hasFailingSync = syncHealth.syncs.some(s => s.consecutive_failures >= 3);
+      const hasStaleSync = syncHealth.syncs.some(s => s.stale);
+      syncHealth.overall_healthy = !hasFailingSync && !hasStaleSync;
+
+      res.json(syncHealth);
+    } catch (e) {
+      console.error('sync health check error:', e);
+      res.status(500).json({ error: e.message });
+    }
+  });
+
   // ─── PCR SYNC: Sync active customers from pcr_shop_list (AccountEdge/PCR source of truth) ───
   // This reads pcr_shop_list from the same Supabase Postgres DB and creates/updates accounts
   async function syncPCRCustomers() {

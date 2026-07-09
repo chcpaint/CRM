@@ -925,7 +925,7 @@ async function startServer() {
 
       // Reps can only see their own sales
       if (isRep) {
-        where.push(`(s.rep_id = $${idx} OR LOWER(TRIM(s.salesperson)) = (SELECT LOWER(TRIM(first_name || ' ' || last_name)) FROM users WHERE id = $${idx}))`);
+        where.push(`(s.rep_id = $${idx} OR LOWER(TRIM(s.salesperson)) = (SELECT LOWER(TRIM(first_name || ' ' || last_name)) FROM users WHERE id = $${idx}) OR LOWER(TRIM(s.salesperson)) = (SELECT LOWER(TRIM(last_name || ', ' || first_name)) FROM users WHERE id = $${idx}))`);
         params.push(uid);
         idx++;
       }
@@ -1043,7 +1043,7 @@ async function startServer() {
             FROM sales_data s
             WHERE s.salesperson IS NOT NULL AND s.salesperson != ''
               AND s.sale_date >= $1 || '-01-01' AND s.sale_date <= $1 || '-12-31'
-              AND (s.rep_id = $3 OR LOWER(TRIM(s.salesperson)) = (SELECT LOWER(TRIM(first_name || ' ' || last_name)) FROM users WHERE id = $3))
+              AND (s.rep_id = $3 OR LOWER(TRIM(s.salesperson)) = (SELECT LOWER(TRIM(first_name || ' ' || last_name)) FROM users WHERE id = $3) OR LOWER(TRIM(s.salesperson)) = (SELECT LOWER(TRIM(last_name || ', ' || first_name)) FROM users WHERE id = $3))
             GROUP BY s.salesperson, s.branch, s.month
           ),
           branch_items AS (
@@ -1169,7 +1169,7 @@ async function startServer() {
                SELECT month, branch, SUM(sale_amount) as rep_amount, COUNT(DISTINCT memo) as inv_count
                FROM sales_data
                WHERE rep_id = $1
-                  OR LOWER(TRIM(salesperson)) = (SELECT LOWER(TRIM(first_name || ' ' || last_name)) FROM users WHERE id = $1)
+                  OR LOWER(TRIM(salesperson)) = (SELECT LOWER(TRIM(first_name || ' ' || last_name)) FROM users WHERE id = $1) OR LOWER(TRIM(salesperson)) = (SELECT LOWER(TRIM(last_name || ', ' || first_name)) FROM users WHERE id = $1)
                GROUP BY month, branch
              ),
              branch_items AS (
@@ -1209,7 +1209,7 @@ async function startServer() {
                       SUM(s.sale_amount) as acct_amount, COUNT(DISTINCT s.memo) as inv_count
                FROM sales_data s
                WHERE (s.rep_id = $1
-                  OR LOWER(TRIM(s.salesperson)) = (SELECT LOWER(TRIM(first_name || ' ' || last_name)) FROM users WHERE id = $1))
+                  OR LOWER(TRIM(s.salesperson)) = (SELECT LOWER(TRIM(first_name || ' ' || last_name)) FROM users WHERE id = $1) OR LOWER(TRIM(s.salesperson)) = (SELECT LOWER(TRIM(last_name || ', ' || first_name)) FROM users WHERE id = $1))
                  AND s.customer_name IS NOT NULL
                GROUP BY s.customer_name, s.salesperson, s.branch, s.month
              ),
@@ -2695,7 +2695,13 @@ async function startServer() {
            WHERE s.rep_id IS NULL
              AND LOWER(TRIM(s.salesperson)) = LOWER(TRIM(u.first_name || ' ' || u.last_name));
 
-          -- ── Link rep_id for common name variants ──
+          -- ── Link rep_id by "Last, First" format (e.g. "Slater, Richard") ──
+          UPDATE sales_data s SET rep_id = u.id
+            FROM users u
+           WHERE s.rep_id IS NULL
+             AND LOWER(TRIM(s.salesperson)) = LOWER(TRIM(u.last_name || ', ' || u.first_name));
+
+          -- ── Link rep_id for common name variants / nicknames ──
           UPDATE sales_data SET rep_id = sub.uid
             FROM (
               SELECT unnest(ARRAY['chiappetta frank','frank c','frankie g','frankie g.']) AS alias,

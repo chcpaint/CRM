@@ -367,7 +367,7 @@ async function startServer() {
   }
   app.use(cors({ origin: corsOrigin, credentials: true }));
   app.use(cookieParser());
-  app.use(express.json({ limit: '10mb' }));
+  app.use(express.json({ limit: '15mb' }));
 
   const authLimiter = rateLimit({ windowMs: 15*60*1000, max: 20, message: { error: 'Too many attempts' } });
   app.use('/api/auth/login', authLimiter);
@@ -2333,6 +2333,287 @@ async function startServer() {
         assignments: assignments.slice(0, 100),
         no_match: noMatch.slice(0, 50)
       });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  //  QUICK NOTES & REMINDERS — personal notepad for each user
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  // ─── GET all notes for current user (own + shared with them) ───
+  app.get('/api/notes', authenticate, async (req, res) => {
+    try {
+      const uid = req.user.userId;
+      const notes = await queryAll(`
+        SELECT n.*,
+               u.first_name || ' ' || u.last_name as author_name,
+               CASE WHEN n.user_id = $1 THEN true ELSE false END as is_owner,
+               COALESCE(
+                 (SELECT json_agg(json_build_object(
+                   'user_id', ns.shared_with,
+                   'name', su.first_name || ' ' || su.last_name
+                 ))
+                 FROM note_shares ns
+                 JOIN users su ON su.id = ns.shared_with
+                 WHERE ns.note_id = n.id), '[]'
+               ) as shared_with,
+               COALESCE(
+                 (SELECT json_agg(json_build_object(
+                   'id', na.id,
+                   'file_name', na.file_name,
+                   'file_type', na.file_type,
+                   'file_size', na.file_size,
+                   'thumbnail_url', na.thumbnail_url,
+                   'created_at', na.created_at
+                 ) ORDER BY na.created_at)
+                 FROM note_attachments na
+                 WHERE na.note_id = n.id), '[]'
+               ) as attachments
+        FROM user_notes n
+        JOIN users u ON u.id = n.user_id
+        LEFT JOIN note_shares ns2 ON ns2.note_id = n.id AND ns2.shared_with = $1
+        WHERE n.user_id = $1 OR ns2.shared_with = $1
+        ORDER BY n.is_pinned DESC, n.created_at DESC
+      `, [uid]);
+      res.json({ notes });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
+  // ─── CREATE a note ───
+  app.post('/api/notes', authenticate, async (req, res) => {
+    try {
+      const uid = req.user.userId;
+      const { content, reminder_at, color, is_pinned } = req.body;
+      if (!content && !req.body.voice_url) return res.status(400).json({ error: 'Content required' });
+      const note = await queryOne(`
+        INSERT INTO user_notes (user_id, content, reminder_at, color, is_pinned)
+        VALUES ($1, $2, $3, $4, $5)
+        RETURNING *
+      `, [uid, content || '', reminder_at || null, color || 'default', is_pinned || false]);
+      res.json({ note });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
+  // ─── UPDATE a note ───
+  app.patch('/api/notes/:id', authenticate, async (req, res) => {
+    try {
+      const uid = req.user.userId;
+      const noteId = req.params.id;
+      // Only owner can edit
+      const existing = await queryOne('SELECT * FROM user_notes WHERE id = $1 AND user_id = $2', [noteId, uid]);
+      if (!existing) return res.status(404).json({ error: 'Note not found or not yours' });
+
+      const fields = [];
+      const values = [];
+      let idx = 1;
+      const allowed = ['content', 'reminder_at', 'color', 'is_pinned', 'completed_at', 'reminder_dismissed', 'voice_url', 'voice_duration_sec'];
+      for (const key of allowed) {
+        if (req.body[key] !== undefined) {
+          fields.push(`${key} = $${idx}`);
+          values.push(req.body[key]);
+          idx++;
+        }
+      }
+      if (fields.length === 0) return res.status(400).json({ error: 'Nothing to update' });
+
+      // If reminder_at changes, reset reminder_sent and reminder_dismissed
+      if (req.body.reminder_at !== undefined) {
+        fields.push(`reminder_sent = false`);
+        fields.push(`reminder_dismissed = false`);
+      }
+      fields.push(`updated_at = NOW()`);
+
+      values.push(noteId, uid);
+      const note = await queryOne(
+        `UPDATE user_notes SET ${fields.join(', ')} WHERE id = $${idx} AND user_id = $${idx + 1} RETURNING *`,
+        values
+      );
+      res.json({ note });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
+  // ─── DELETE a note ───
+  app.delete('/api/notes/:id', authenticate, async (req, res) => {
+    try {
+      const uid = req.user.userId;
+      const result = await queryOne('DELETE FROM user_notes WHERE id = $1 AND user_id = $2 RETURNING id', [req.params.id, uid]);
+      if (!result) return res.status(404).json({ error: 'Note not found or not yours' });
+      res.json({ deleted: true });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
+  // ─── SHARE a note with another user ───
+  app.post('/api/notes/:id/share', authenticate, async (req, res) => {
+    try {
+      const uid = req.user.userId;
+      const noteId = req.params.id;
+      const { user_id: targetUserId } = req.body;
+      if (!targetUserId) return res.status(400).json({ error: 'user_id required' });
+
+      // Verify note ownership
+      const note = await queryOne('SELECT id FROM user_notes WHERE id = $1 AND user_id = $2', [noteId, uid]);
+      if (!note) return res.status(404).json({ error: 'Note not found or not yours' });
+
+      // Verify target user exists
+      const target = await queryOne('SELECT id, first_name, last_name FROM users WHERE id = $1', [targetUserId]);
+      if (!target) return res.status(404).json({ error: 'User not found' });
+
+      await queryOne(`
+        INSERT INTO note_shares (note_id, shared_by, shared_with)
+        VALUES ($1, $2, $3)
+        ON CONFLICT (note_id, shared_with) DO NOTHING
+        RETURNING *
+      `, [noteId, uid, targetUserId]);
+
+      res.json({ shared: true, with: { user_id: target.id, name: `${target.first_name} ${target.last_name}` } });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
+  // ─── UNSHARE a note ───
+  app.delete('/api/notes/:id/share/:userId', authenticate, async (req, res) => {
+    try {
+      const uid = req.user.userId;
+      await queryOne('DELETE FROM note_shares WHERE note_id = $1 AND shared_by = $2 AND shared_with = $3 RETURNING id',
+        [req.params.id, uid, req.params.userId]);
+      res.json({ unshared: true });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
+  // ─── VOICE UPLOAD — store base64 audio data ───
+  app.post('/api/notes/:id/voice', authenticate, async (req, res) => {
+    try {
+      const uid = req.user.userId;
+      const noteId = req.params.id;
+      const { audio_data, duration_sec } = req.body;
+      if (!audio_data) return res.status(400).json({ error: 'audio_data required' });
+
+      // Store as data URL in voice_url field (base64 encoded audio)
+      const note = await queryOne(`
+        UPDATE user_notes SET voice_url = $1, voice_duration_sec = $2, updated_at = NOW()
+        WHERE id = $3 AND user_id = $4 RETURNING *
+      `, [audio_data, duration_sec || 0, noteId, uid]);
+      if (!note) return res.status(404).json({ error: 'Note not found' });
+      res.json({ note });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
+  // ─── GET DUE REMINDERS — returns notes with reminders that have fired ───
+  app.get('/api/notes/reminders/due', authenticate, async (req, res) => {
+    try {
+      const uid = req.user.userId;
+      const due = await queryAll(`
+        SELECT n.*, u.first_name || ' ' || u.last_name as author_name
+        FROM user_notes n
+        JOIN users u ON u.id = n.user_id
+        LEFT JOIN note_shares ns ON ns.note_id = n.id AND ns.shared_with = $1
+        WHERE (n.user_id = $1 OR ns.shared_with = $1)
+          AND n.reminder_at IS NOT NULL
+          AND n.reminder_at <= NOW()
+          AND n.reminder_sent = false
+          AND n.reminder_dismissed = false
+          AND n.completed_at IS NULL
+      `, [uid]);
+
+      // Mark as sent
+      if (due.length > 0) {
+        const ids = due.map(d => d.id);
+        await queryAll(`UPDATE user_notes SET reminder_sent = true WHERE id = ANY($1::int[])`, [ids]);
+      }
+
+      res.json({ reminders: due });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
+  // ─── DISMISS a reminder ───
+  app.post('/api/notes/:id/dismiss', authenticate, async (req, res) => {
+    try {
+      const uid = req.user.userId;
+      await queryOne(`
+        UPDATE user_notes SET reminder_dismissed = true, updated_at = NOW()
+        WHERE id = $1 AND (user_id = $2 OR id IN (SELECT note_id FROM note_shares WHERE shared_with = $2))
+      `, [req.params.id, uid]);
+      res.json({ dismissed: true });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
+  // ─── LIST users for share picker (lightweight) ───
+  app.get('/api/notes/users', authenticate, async (req, res) => {
+    try {
+      const users = await queryAll(`
+        SELECT id, first_name, last_name, role FROM users
+        WHERE id != $1 AND active = true
+        ORDER BY first_name, last_name
+      `, [req.user.userId]);
+      res.json({ users });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
+  // ─── UPLOAD attachment to a note (base64 data URL) ───
+  app.post('/api/notes/:id/attachments', authenticate, async (req, res) => {
+    try {
+      const uid = req.user.userId;
+      const noteId = req.params.id;
+      const { file_name, file_type, file_size, data_url, thumbnail_url } = req.body;
+      if (!data_url || !file_name) return res.status(400).json({ error: 'file_name and data_url required' });
+
+      // Verify note ownership
+      const note = await queryOne('SELECT id FROM user_notes WHERE id = $1 AND user_id = $2', [noteId, uid]);
+      if (!note) return res.status(404).json({ error: 'Note not found or not yours' });
+
+      // Limit: 10MB per file
+      const sizeBytes = file_size || data_url.length;
+      if (sizeBytes > 10 * 1024 * 1024) return res.status(413).json({ error: 'File too large (max 10MB)' });
+
+      // Limit: 5 attachments per note
+      const count = await queryOne('SELECT COUNT(*)::int as cnt FROM note_attachments WHERE note_id = $1', [noteId]);
+      if (count && count.cnt >= 5) return res.status(400).json({ error: 'Max 5 attachments per note' });
+
+      const attachment = await queryOne(`
+        INSERT INTO note_attachments (note_id, file_name, file_type, file_size, data_url, thumbnail_url)
+        VALUES ($1, $2, $3, $4, $5, $6) RETURNING *
+      `, [noteId, file_name, file_type || 'application/octet-stream', sizeBytes, data_url, thumbnail_url || null]);
+
+      await queryOne('UPDATE user_notes SET updated_at = NOW() WHERE id = $1', [noteId]);
+      res.json({ attachment });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
+  // ─── DELETE an attachment ───
+  app.delete('/api/notes/:id/attachments/:attachmentId', authenticate, async (req, res) => {
+    try {
+      const uid = req.user.userId;
+      const noteId = req.params.id;
+      // Verify note ownership
+      const note = await queryOne('SELECT id FROM user_notes WHERE id = $1 AND user_id = $2', [noteId, uid]);
+      if (!note) return res.status(404).json({ error: 'Note not found or not yours' });
+
+      const result = await queryOne('DELETE FROM note_attachments WHERE id = $1 AND note_id = $2 RETURNING id',
+        [req.params.attachmentId, noteId]);
+      if (!result) return res.status(404).json({ error: 'Attachment not found' });
+      res.json({ deleted: true });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
+  // ─── GET attachments for a note ───
+  app.get('/api/notes/:id/attachments', authenticate, async (req, res) => {
+    try {
+      const attachments = await queryAll(
+        'SELECT id, note_id, file_name, file_type, file_size, thumbnail_url, created_at FROM note_attachments WHERE note_id = $1 ORDER BY created_at',
+        [req.params.id]
+      );
+      res.json({ attachments });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
+  // ─── DOWNLOAD a single attachment (returns data_url) ───
+  app.get('/api/notes/:id/attachments/:attachmentId/download', authenticate, async (req, res) => {
+    try {
+      const att = await queryOne(
+        'SELECT * FROM note_attachments WHERE id = $1 AND note_id = $2',
+        [req.params.attachmentId, req.params.id]
+      );
+      if (!att) return res.status(404).json({ error: 'Attachment not found' });
+      res.json({ attachment: att });
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
 

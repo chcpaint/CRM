@@ -3,6 +3,14 @@ import { api } from '../services/api';
 
 // ─── Types ───
 interface NoteShare { user_id: number; name: string }
+interface NoteAttachment {
+  id: number;
+  file_name: string;
+  file_type: string;
+  file_size: number;
+  thumbnail_url?: string | null;
+  created_at: string;
+}
 interface Note {
   id: number;
   user_id: number;
@@ -20,17 +28,24 @@ interface Note {
   author_name?: string;
   is_owner?: boolean;
   shared_with?: NoteShare[];
+  attachments?: NoteAttachment[];
+}
+
+interface PendingFile {
+  file: File;
+  preview: string | null; // data URL for images
+  dataUrl: string; // full data URL for upload
 }
 
 interface ShareableUser { id: number; first_name: string; last_name: string; role: string }
 
-const COLORS: { value: string; label: string; bg: string; border: string }[] = [
-  { value: 'default', label: 'Default', bg: 'bg-white', border: 'border-navy-100' },
-  { value: 'yellow',  label: 'Yellow',  bg: 'bg-yellow-50', border: 'border-yellow-200' },
-  { value: 'blue',    label: 'Blue',    bg: 'bg-blue-50', border: 'border-blue-200' },
-  { value: 'green',   label: 'Green',   bg: 'bg-green-50', border: 'border-green-200' },
-  { value: 'pink',    label: 'Pink',    bg: 'bg-pink-50', border: 'border-pink-200' },
-  { value: 'orange',  label: 'Orange',  bg: 'bg-orange-50', border: 'border-orange-200' },
+const COLORS: { value: string; label: string; bg: string; border: string; swatch: string }[] = [
+  { value: 'default', label: 'Default', bg: 'bg-white',      border: 'border-navy-100',   swatch: 'bg-navy-200' },
+  { value: 'yellow',  label: 'Yellow',  bg: 'bg-yellow-50',  border: 'border-yellow-300', swatch: 'bg-yellow-400' },
+  { value: 'blue',    label: 'Blue',    bg: 'bg-blue-50',    border: 'border-blue-300',   swatch: 'bg-blue-400' },
+  { value: 'green',   label: 'Green',   bg: 'bg-green-50',   border: 'border-green-300',  swatch: 'bg-green-400' },
+  { value: 'pink',    label: 'Pink',    bg: 'bg-pink-50',    border: 'border-pink-300',   swatch: 'bg-pink-400' },
+  { value: 'orange',  label: 'Orange',  bg: 'bg-orange-50',  border: 'border-orange-300', swatch: 'bg-orange-400' },
 ];
 
 function getColorClasses(color: string) {
@@ -71,9 +86,15 @@ export default function QuickNotes() {
   const audioChunks = useRef<Blob[]>([]);
   const recordingInterval = useRef<ReturnType<typeof setInterval> | null>(null);
   const [pendingVoiceBlob, setPendingVoiceBlob] = useState<Blob | null>(null);
+  const [pendingFiles, setPendingFiles] = useState<PendingFile[]>([]);
+  const [uploadingAttachment, setUploadingAttachment] = useState(false);
+  const [previewImage, setPreviewImage] = useState<string | null>(null);
 
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const noteFileInputRef = useRef<HTMLInputElement>(null);
+  const [attachToNoteId, setAttachToNoteId] = useState<number | null>(null);
 
   // ─── Load notes ───
   const loadNotes = useCallback(async () => {
@@ -107,22 +128,27 @@ export default function QuickNotes() {
   // ─── Create note ───
   const createNote = async () => {
     const content = newContent.trim();
-    if (!content && !pendingVoiceBlob) return;
+    if (!content && !pendingVoiceBlob && pendingFiles.length === 0) return;
     try {
       const res = await api.post('/notes', {
-        content,
+        content: content || (pendingFiles.length > 0 ? '(Attachment)' : ''),
         reminder_at: newReminder || null,
         color: newColor,
       });
-      // If there's a voice recording, upload it
+      // Upload voice recording if present
       if (pendingVoiceBlob && res.note) {
         await uploadVoice(res.note.id, pendingVoiceBlob);
+      }
+      // Upload file attachments if present
+      if (pendingFiles.length > 0 && res.note) {
+        await uploadAttachments(res.note.id, pendingFiles);
       }
       setNewContent('');
       setNewReminder('');
       setNewColor('default');
       setShowComposer(false);
       setPendingVoiceBlob(null);
+      setPendingFiles([]);
       loadNotes();
     } catch (err) {
       console.error('Failed to create note:', err);
@@ -228,6 +254,133 @@ export default function QuickNotes() {
     } catch (err) {
       console.error('Share failed:', err);
     }
+  };
+
+  // ─── File attachments ───
+  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files) return;
+    Array.from(files).forEach(file => {
+      if (file.size > 10 * 1024 * 1024) {
+        alert(`"${file.name}" is too large (max 10MB)`);
+        return;
+      }
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        const dataUrl = reader.result as string;
+        const isImage = file.type.startsWith('image/');
+        setPendingFiles(prev => [...prev, {
+          file,
+          preview: isImage ? dataUrl : null,
+          dataUrl,
+        }]);
+      };
+      reader.readAsDataURL(file);
+    });
+    e.target.value = ''; // reset so same file can be re-selected
+  };
+
+  const removePendingFile = (idx: number) => {
+    setPendingFiles(prev => prev.filter((_, i) => i !== idx));
+  };
+
+  const uploadAttachments = async (noteId: number, files: PendingFile[]) => {
+    for (const pf of files) {
+      try {
+        // For images, generate a smaller thumbnail
+        let thumbnailUrl: string | null = null;
+        if (pf.file.type.startsWith('image/')) {
+          thumbnailUrl = await generateThumbnail(pf.dataUrl, 200);
+        }
+        await api.post(`/notes/${noteId}/attachments`, {
+          file_name: pf.file.name,
+          file_type: pf.file.type,
+          file_size: pf.file.size,
+          data_url: pf.dataUrl,
+          thumbnail_url: thumbnailUrl,
+        });
+      } catch (err) {
+        console.error(`Failed to upload ${pf.file.name}:`, err);
+      }
+    }
+  };
+
+  const generateThumbnail = (dataUrl: string, maxDim: number): Promise<string> => {
+    return new Promise((resolve) => {
+      const img = new Image();
+      img.onload = () => {
+        const canvas = document.createElement('canvas');
+        let w = img.width, h = img.height;
+        if (w > h) { h = (h / w) * maxDim; w = maxDim; }
+        else { w = (w / h) * maxDim; h = maxDim; }
+        canvas.width = w;
+        canvas.height = h;
+        const ctx = canvas.getContext('2d');
+        ctx?.drawImage(img, 0, 0, w, h);
+        resolve(canvas.toDataURL('image/jpeg', 0.7));
+      };
+      img.onerror = () => resolve(dataUrl);
+      img.src = dataUrl;
+    });
+  };
+
+  const addAttachmentToNote = async (noteId: number, e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files) return;
+    setUploadingAttachment(true);
+    for (const file of Array.from(files)) {
+      if (file.size > 10 * 1024 * 1024) { alert(`"${file.name}" too large (max 10MB)`); continue; }
+      const reader = new FileReader();
+      await new Promise<void>((resolve) => {
+        reader.onloadend = async () => {
+          const dataUrl = reader.result as string;
+          let thumbnailUrl: string | null = null;
+          if (file.type.startsWith('image/')) {
+            thumbnailUrl = await generateThumbnail(dataUrl, 200);
+          }
+          try {
+            await api.post(`/notes/${noteId}/attachments`, {
+              file_name: file.name,
+              file_type: file.type,
+              file_size: file.size,
+              data_url: dataUrl,
+              thumbnail_url: thumbnailUrl,
+            });
+          } catch (err) { console.error('Attachment upload failed:', err); }
+          resolve();
+        };
+        reader.readAsDataURL(file);
+      });
+    }
+    e.target.value = '';
+    setAttachToNoteId(null);
+    setUploadingAttachment(false);
+    loadNotes();
+  };
+
+  const deleteAttachment = async (noteId: number, attachmentId: number) => {
+    try {
+      await api.delete(`/notes/${noteId}/attachments/${attachmentId}`);
+      loadNotes();
+    } catch (err) { console.error('Failed to delete attachment:', err); }
+  };
+
+  const downloadAttachment = async (noteId: number, attachment: NoteAttachment) => {
+    try {
+      const data = await api.get(`/notes/${noteId}/attachments/${attachment.id}/download`);
+      if (data.attachment?.data_url) {
+        const a = document.createElement('a');
+        a.href = data.attachment.data_url;
+        a.download = attachment.file_name;
+        a.click();
+      }
+    } catch (err) { console.error('Download failed:', err); }
+  };
+
+  const formatFileSize = (bytes: number) => {
+    if (bytes < 1024) return `${bytes}B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)}KB`;
+    return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
   };
 
   // ─── Inline edit ───
@@ -370,7 +523,7 @@ export default function QuickNotes() {
                 rows={3}
                 className="w-full px-3 py-2 rounded-xl border border-navy-200 focus:border-brand-400 focus:ring-1 focus:ring-brand-400 text-sm resize-none outline-none"
               />
-              {/* Voice recording + pending voice */}
+              {/* Voice recording + file attach */}
               <div className="flex items-center gap-2">
                 {recording ? (
                   <button
@@ -381,15 +534,34 @@ export default function QuickNotes() {
                     {formatDuration(recordingTime)} — Tap to stop
                   </button>
                 ) : (
-                  <button
-                    onClick={startRecording}
-                    title="Record voice note"
-                    className="p-2 rounded-lg hover:bg-navy-100 text-navy-400 hover:text-brand-600 transition-colors"
-                  >
-                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
-                    </svg>
-                  </button>
+                  <>
+                    <button
+                      onClick={startRecording}
+                      title="Record voice note"
+                      className="p-2 rounded-lg hover:bg-navy-100 text-navy-400 hover:text-brand-600 transition-colors"
+                    >
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
+                      </svg>
+                    </button>
+                    <button
+                      onClick={() => fileInputRef.current?.click()}
+                      title="Attach photo or file"
+                      className="p-2 rounded-lg hover:bg-navy-100 text-navy-400 hover:text-brand-600 transition-colors"
+                    >
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" />
+                      </svg>
+                    </button>
+                    <input
+                      ref={fileInputRef}
+                      type="file"
+                      multiple
+                      accept="image/*,.pdf,.doc,.docx,.xls,.xlsx,.txt,.csv"
+                      onChange={handleFileSelect}
+                      className="hidden"
+                    />
+                  </>
                 )}
                 {pendingVoiceBlob && !recording && (
                   <span className="text-[10px] text-green-600 font-medium flex items-center gap-1">
@@ -398,6 +570,33 @@ export default function QuickNotes() {
                   </span>
                 )}
               </div>
+              {/* Pending file previews */}
+              {pendingFiles.length > 0 && (
+                <div className="flex flex-wrap gap-1.5">
+                  {pendingFiles.map((pf, idx) => (
+                    <div key={idx} className="relative group/file">
+                      {pf.preview ? (
+                        <img src={pf.preview} alt={pf.file.name} className="w-14 h-14 object-cover rounded-lg border border-navy-200" />
+                      ) : (
+                        <div className="w-14 h-14 rounded-lg border border-navy-200 bg-navy-50 flex flex-col items-center justify-center">
+                          <svg className="w-5 h-5 text-navy-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 21h10a2 2 0 002-2V9.414a1 1 0 00-.293-.707l-5.414-5.414A1 1 0 0012.586 3H7a2 2 0 00-2 2v14a2 2 0 002 2z" />
+                          </svg>
+                          <span className="text-[8px] text-navy-400 mt-0.5 truncate max-w-[52px] px-1">{pf.file.name.split('.').pop()}</span>
+                        </div>
+                      )}
+                      <button
+                        onClick={() => removePendingFile(idx)}
+                        className="absolute -top-1.5 -right-1.5 w-4 h-4 bg-red-500 text-white rounded-full flex items-center justify-center opacity-0 group-hover/file:opacity-100 transition-opacity"
+                      >
+                        <svg className="w-2.5 h-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M6 18L18 6M6 6l12 12" />
+                        </svg>
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
               {/* Reminder picker */}
               <div className="flex items-center gap-2">
                 <label className="text-[10px] text-navy-500 font-medium flex-shrink-0">Remind:</label>
@@ -415,8 +614,8 @@ export default function QuickNotes() {
                     key={c.value}
                     onClick={() => setNewColor(c.value)}
                     title={c.label}
-                    className={`w-5 h-5 rounded-full border-2 transition-all ${c.bg} ${
-                      newColor === c.value ? 'border-brand-500 scale-110' : 'border-navy-200 hover:border-navy-300'
+                    className={`w-6 h-6 rounded-full border-2 transition-all ${c.swatch} ${
+                      newColor === c.value ? 'border-navy-800 scale-110 ring-2 ring-brand-300' : 'border-white hover:scale-105'
                     }`}
                   />
                 ))}
@@ -424,14 +623,14 @@ export default function QuickNotes() {
               {/* Actions */}
               <div className="flex items-center justify-between pt-1">
                 <button
-                  onClick={() => { setShowComposer(false); setNewContent(''); setNewReminder(''); setNewColor('default'); setPendingVoiceBlob(null); }}
+                  onClick={() => { setShowComposer(false); setNewContent(''); setNewReminder(''); setNewColor('default'); setPendingVoiceBlob(null); setPendingFiles([]); }}
                   className="text-xs text-navy-400 hover:text-navy-600 px-2 py-1"
                 >
                   Cancel
                 </button>
                 <button
                   onClick={createNote}
-                  disabled={!newContent.trim() && !pendingVoiceBlob}
+                  disabled={!newContent.trim() && !pendingVoiceBlob && pendingFiles.length === 0}
                   className="px-4 py-1.5 rounded-lg bg-brand-600 text-white text-xs font-medium hover:bg-brand-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
                 >
                   Save Note
@@ -530,6 +729,55 @@ export default function QuickNotes() {
                     </div>
                   )}
 
+                  {/* Attachments */}
+                  {note.attachments && note.attachments.length > 0 && (
+                    <div className="mt-2 flex flex-wrap gap-1.5">
+                      {note.attachments.map(att => {
+                        const isImage = att.file_type.startsWith('image/');
+                        return (
+                          <div key={att.id} className="relative group/att">
+                            {isImage && att.thumbnail_url ? (
+                              <img
+                                src={att.thumbnail_url}
+                                alt={att.file_name}
+                                className="w-16 h-16 object-cover rounded-lg border border-navy-200 cursor-pointer hover:opacity-90 transition-opacity"
+                                onClick={() => {
+                                  // Fetch full image and show preview
+                                  api.get(`/notes/${note.id}/attachments/${att.id}/download`).then(d => {
+                                    if (d.attachment?.data_url) setPreviewImage(d.attachment.data_url);
+                                  });
+                                }}
+                              />
+                            ) : (
+                              <button
+                                onClick={() => downloadAttachment(note.id, att)}
+                                className="w-16 h-16 rounded-lg border border-navy-200 bg-navy-50 hover:bg-navy-100 flex flex-col items-center justify-center transition-colors"
+                              >
+                                <svg className="w-5 h-5 text-navy-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 21h10a2 2 0 002-2V9.414a1 1 0 00-.293-.707l-5.414-5.414A1 1 0 0012.586 3H7a2 2 0 00-2 2v14a2 2 0 002 2z" />
+                                </svg>
+                                <span className="text-[7px] text-navy-500 mt-0.5 truncate max-w-[56px] px-1 font-medium">{att.file_name.split('.').pop()?.toUpperCase()}</span>
+                              </button>
+                            )}
+                            <div className="absolute -bottom-0.5 left-0 right-0 text-center">
+                              <span className="text-[7px] text-navy-400 bg-white/80 px-1 rounded">{formatFileSize(att.file_size)}</span>
+                            </div>
+                            {note.is_owner !== false && (
+                              <button
+                                onClick={() => deleteAttachment(note.id, att.id)}
+                                className="absolute -top-1.5 -right-1.5 w-4 h-4 bg-red-500 text-white rounded-full flex items-center justify-center opacity-0 group-hover/att:opacity-100 transition-opacity"
+                              >
+                                <svg className="w-2.5 h-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M6 18L18 6M6 6l12 12" />
+                                </svg>
+                              </button>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+
                   {/* Reminder badge */}
                   {note.reminder_at && !note.completed_at && (
                     <div className={`mt-2 flex items-center gap-1 text-[10px] font-medium ${
@@ -596,6 +844,18 @@ export default function QuickNotes() {
                           </svg>
                         </button>
                       )}
+                      {/* Attach file */}
+                      {note.is_owner !== false && (
+                        <button
+                          onClick={() => { setAttachToNoteId(note.id); setTimeout(() => noteFileInputRef.current?.click(), 50); }}
+                          title="Attach photo or file"
+                          className={`p-1 rounded hover:bg-navy-100 transition-colors ${uploadingAttachment && attachToNoteId === note.id ? 'text-brand-500 animate-pulse' : 'text-navy-400 hover:text-brand-500'}`}
+                        >
+                          <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" />
+                          </svg>
+                        </button>
+                      )}
                       {/* Share */}
                       {note.is_owner !== false && (
                         <button
@@ -625,14 +885,14 @@ export default function QuickNotes() {
 
                   {/* Color picker dropdown */}
                   {colorPickerId === note.id && (
-                    <div className="mt-2 flex items-center gap-1.5 p-1.5 bg-white rounded-lg border border-navy-100 shadow-sm">
+                    <div className="mt-2 flex items-center gap-1.5 p-2 bg-white rounded-lg border border-navy-100 shadow-sm">
                       {COLORS.map(c => (
                         <button
                           key={c.value}
                           onClick={() => { updateNote(note.id, { color: c.value } as any); setColorPickerId(null); }}
                           title={c.label}
-                          className={`w-6 h-6 rounded-full border-2 transition-all ${c.bg} ${
-                            note.color === c.value ? 'border-brand-500 scale-110' : 'border-navy-200 hover:border-navy-400'
+                          className={`w-7 h-7 rounded-full border-2 transition-all ${c.swatch} ${
+                            note.color === c.value ? 'border-navy-800 scale-110 ring-2 ring-brand-300' : 'border-white hover:scale-105'
                           }`}
                         />
                       ))}
@@ -644,6 +904,34 @@ export default function QuickNotes() {
           )}
         </div>
       </div>
+
+      {/* Hidden file input for attaching to existing notes */}
+      <input
+        ref={noteFileInputRef}
+        type="file"
+        multiple
+        accept="image/*,.pdf,.doc,.docx,.xls,.xlsx,.txt,.csv"
+        onChange={(e) => attachToNoteId && addAttachmentToNote(attachToNoteId, e)}
+        className="hidden"
+      />
+
+      {/* ── Image Preview Modal ── */}
+      {previewImage && (
+        <>
+          <div className="fixed inset-0 bg-black/70 z-[80]" onClick={() => setPreviewImage(null)} />
+          <div className="fixed inset-4 z-[81] flex items-center justify-center" onClick={() => setPreviewImage(null)}>
+            <img src={previewImage} alt="Preview" className="max-w-full max-h-full object-contain rounded-xl shadow-2xl" />
+            <button
+              onClick={() => setPreviewImage(null)}
+              className="absolute top-2 right-2 w-8 h-8 bg-black/60 text-white rounded-full flex items-center justify-center hover:bg-black/80 transition-colors"
+            >
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+          </div>
+        </>
+      )}
 
       {/* ── Share Modal ── */}
       {shareNoteId && (

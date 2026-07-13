@@ -4,6 +4,7 @@ import { User } from '../../types';
 import AISearchBar from '../search/AISearchBar';
 import NotificationBell from '../notifications/NotificationBell';
 import BodyShopWiz from '../BodyShopWiz';
+import QuickNotes from '../QuickNotes';
 
 interface LayoutProps {
   user: User;
@@ -207,6 +208,9 @@ export default function Layout({ user, onLogout, children }: LayoutProps) {
 
       {/* Body Shop Wiz floating panel */}
       <BodyShopWiz />
+
+      {/* Quick Notes sidebar */}
+      <QuickNotes />
     </div>
   );
 }

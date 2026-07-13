@@ -14,6 +14,7 @@ import CustomerAlertsPage from './pages/CustomerAlertsPage';
 import CompetitiveMarketInfoPage from './pages/CompetitiveMarketInfoPage';
 import Layout from './components/layout/Layout';
 import UpdateBanner from './components/UpdateBanner';
+import ReminderNotifier from './components/ReminderNotifier';
 
 export default function App() {
   const [user, setUser] = useState<User | null>(null);
@@ -82,6 +83,7 @@ export default function App() {
   return (
     <Layout user={user} onLogout={handleLogout}>
       <UpdateBanner />
+      <ReminderNotifier />
       <Routes>
         <Route path="/" element={<DashboardPage user={user} />} />
         <Route path="/accounts" element={<AccountsPage user={user} />} />

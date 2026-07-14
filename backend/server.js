@@ -925,7 +925,7 @@ async function startServer() {
 
       // Reps can only see their own sales
       if (isRep) {
-        where.push(`(s.rep_id = $${idx} OR LOWER(TRIM(s.salesperson)) = (SELECT LOWER(TRIM(first_name || ' ' || last_name)) FROM users WHERE id = $${idx}) OR LOWER(TRIM(s.salesperson)) = (SELECT LOWER(TRIM(last_name || ', ' || first_name)) FROM users WHERE id = $${idx}))`);
+        where.push(`s.rep_id = $${idx}`);
         params.push(uid);
         idx++;
       }
@@ -1035,16 +1035,16 @@ async function startServer() {
 
       let rows;
       if (isRep) {
-        // Rep only sees their own revenue
+        // Rep only sees their own revenue — match by rep_id primarily
         rows = await queryAll(`
           WITH rep_items AS (
-            SELECT s.salesperson, s.branch, s.month,
+            SELECT s.rep_id, MAX(s.salesperson) as salesperson, s.branch, s.month,
                    SUM(s.sale_amount) as sp_amount
             FROM sales_data s
             WHERE s.salesperson IS NOT NULL AND s.salesperson != ''
               AND s.sale_date >= $1 || '-01-01' AND s.sale_date <= $1 || '-12-31'
-              AND (s.rep_id = $3 OR LOWER(TRIM(s.salesperson)) = (SELECT LOWER(TRIM(first_name || ' ' || last_name)) FROM users WHERE id = $3) OR LOWER(TRIM(s.salesperson)) = (SELECT LOWER(TRIM(last_name || ', ' || first_name)) FROM users WHERE id = $3))
-            GROUP BY s.salesperson, s.branch, s.month
+              AND s.rep_id = $3
+            GROUP BY s.rep_id, s.branch, s.month
           ),
           branch_items AS (
             SELECT month, branch, SUM(sale_amount) as branch_amount
@@ -1075,15 +1075,16 @@ async function startServer() {
           ORDER BY ytd_revenue DESC
         `, [year, currentMonth, uid]);
       } else {
-        // Admin/manager sees all salespersons
+        // Admin/manager sees all salespersons — group by rep_id to consolidate name variants
         rows = await queryAll(`
           WITH sp_items AS (
-            SELECT s.salesperson, s.branch, s.month,
+            SELECT COALESCE(s.rep_id::text, s.salesperson) as group_key,
+                   MAX(s.salesperson) as salesperson, s.branch, s.month,
                    SUM(s.sale_amount) as sp_amount
             FROM sales_data s
             WHERE s.salesperson IS NOT NULL AND s.salesperson != ''
               AND s.sale_date >= $1 || '-01-01' AND s.sale_date <= $1 || '-12-31'
-            GROUP BY s.salesperson, s.branch, s.month
+            GROUP BY group_key, s.branch, s.month
           ),
           branch_items AS (
             SELECT month, branch, SUM(sale_amount) as branch_amount
@@ -1169,7 +1170,6 @@ async function startServer() {
                SELECT month, branch, SUM(sale_amount) as rep_amount, COUNT(DISTINCT memo) as inv_count
                FROM sales_data
                WHERE rep_id = $1
-                  OR LOWER(TRIM(salesperson)) = (SELECT LOWER(TRIM(first_name || ' ' || last_name)) FROM users WHERE id = $1) OR LOWER(TRIM(salesperson)) = (SELECT LOWER(TRIM(last_name || ', ' || first_name)) FROM users WHERE id = $1)
                GROUP BY month, branch
              ),
              branch_items AS (
@@ -1208,8 +1208,7 @@ async function startServer() {
                SELECT s.customer_name, s.salesperson, s.branch, s.month,
                       SUM(s.sale_amount) as acct_amount, COUNT(DISTINCT s.memo) as inv_count
                FROM sales_data s
-               WHERE (s.rep_id = $1
-                  OR LOWER(TRIM(s.salesperson)) = (SELECT LOWER(TRIM(first_name || ' ' || last_name)) FROM users WHERE id = $1) OR LOWER(TRIM(s.salesperson)) = (SELECT LOWER(TRIM(last_name || ', ' || first_name)) FROM users WHERE id = $1))
+               WHERE s.rep_id = $1
                  AND s.customer_name IS NOT NULL
                GROUP BY s.customer_name, s.salesperson, s.branch, s.month
              ),
@@ -2952,8 +2951,13 @@ async function startServer() {
           CREATE TEMP TABLE _sales_scratch AS
             SELECT row FROM jsonb_array_elements(v_payload->'rows') AS row;
           DELETE FROM sales_data WHERE imported_from_accountedge = true;
+
+          -- v3 column mapping (VERIFIED):
+          -- pos0=branch_idx, pos1=customer_idx, pos2=month, pos3=year,
+          -- pos4=amount_cents, pos5=invoice_num, pos6=quantity, pos7=sku_idx,
+          -- pos8=cl1_idx(category), pos9=cl2_idx(product_line), pos10=sp_idx, pos11=day
           INSERT INTO sales_data
-            (sale_amount, sale_date, month, customer_name, item_name, quantity, salesperson, category, product_line, imported_from_accountedge, memo)
+            (sale_amount, sale_date, month, customer_name, item_name, quantity, salesperson, category, product_line, imported_from_accountedge, memo, branch)
           SELECT
             ((row->>4)::numeric / 100.0)::real,
             ((row->>3) || '-' || lpad((row->>2),2,'0') || '-' || lpad((row->>11),2,'0')),
@@ -2961,11 +2965,19 @@ async function startServer() {
             (v_payload->'customers'->((row->>1)::int))#>>'{}',
             (v_payload->'skus'->((row->>7)::int))#>>'{}',
             (row->>6)::int,
-            (v_payload->'sp'->((row->>10)::int))#>>'{}',
+            -- Normalize salesperson: "Last, First" → "First Last"
+            CASE
+              WHEN (v_payload->'sp'->((row->>10)::int))#>>'{}' LIKE '%,%'
+              THEN TRIM(SPLIT_PART((v_payload->'sp'->((row->>10)::int))#>>'{}', ',', 2))
+                   || ' '
+                   || TRIM(SPLIT_PART((v_payload->'sp'->((row->>10)::int))#>>'{}', ',', 1))
+              ELSE (v_payload->'sp'->((row->>10)::int))#>>'{}'
+            END,
             (v_payload->'cl1'->((row->>8)::int))#>>'{}',
             (v_payload->'cl2'->((row->>9)::int))#>>'{}',
             true,
-            'Invoice ' || (row->>5)
+            'Invoice ' || (row->>5),
+            (v_payload->'branches'->((row->>0)::int))#>>'{}'
           FROM _sales_scratch;
           GET DIAGNOSTICS v_inserted = ROW_COUNT;
           DROP TABLE _sales_scratch;
@@ -2974,22 +2986,35 @@ async function startServer() {
           UPDATE sales_data s SET rep_id = u.id
             FROM users u
            WHERE s.rep_id IS NULL
+             AND s.imported_from_accountedge = true
              AND LOWER(TRIM(s.salesperson)) = LOWER(TRIM(u.first_name || ' ' || u.last_name));
 
-          -- ── Link rep_id by "Last, First" format (e.g. "Slater, Richard") ──
+          -- ── Link rep_id by "Last, First" format (shouldn't happen after normalization but just in case) ──
           UPDATE sales_data s SET rep_id = u.id
             FROM users u
            WHERE s.rep_id IS NULL
+             AND s.imported_from_accountedge = true
              AND LOWER(TRIM(s.salesperson)) = LOWER(TRIM(u.last_name || ', ' || u.first_name));
+
+          -- ── Link rep_id by first name OR last name alone (robust fallback) ──
+          UPDATE sales_data s SET rep_id = u.id
+            FROM users u
+           WHERE s.rep_id IS NULL
+             AND s.imported_from_accountedge = true
+             AND u.is_active = true
+             AND (
+               LOWER(TRIM(s.salesperson)) = LOWER(TRIM(u.first_name))
+               OR LOWER(TRIM(s.salesperson)) = LOWER(TRIM(u.last_name))
+             )
+             AND (SELECT COUNT(*) FROM users u2 WHERE u2.is_active = true
+                  AND (LOWER(TRIM(u2.first_name)) = LOWER(TRIM(s.salesperson))
+                       OR LOWER(TRIM(u2.last_name)) = LOWER(TRIM(s.salesperson)))) = 1;
 
           -- ── Link rep_id for common name variants / nicknames ──
           UPDATE sales_data SET rep_id = sub.uid
             FROM (
               SELECT unnest(ARRAY['chiappetta frank','frank c','frankie g','frankie g.']) AS alias,
                      (SELECT id FROM users WHERE LOWER(first_name)='frank' AND LOWER(last_name)='chiappetta' LIMIT 1) AS uid
-              UNION ALL
-              SELECT unnest(ARRAY['halliday, ben']),
-                     (SELECT id FROM users WHERE LOWER(first_name)='ben' AND LOWER(last_name)='halliday' LIMIT 1)
               UNION ALL
               SELECT unnest(ARRAY['manny','manni']),
                      (SELECT id FROM users WHERE LOWER(first_name)='manny' AND LOWER(last_name)='pacheco' LIMIT 1)
@@ -2998,6 +3023,7 @@ async function startServer() {
                      (SELECT id FROM users WHERE LOWER(first_name)='tony' AND LOWER(last_name)='galati' LIMIT 1)
             ) sub
            WHERE sales_data.rep_id IS NULL
+             AND sales_data.imported_from_accountedge = true
              AND LOWER(TRIM(sales_data.salesperson)) = sub.alias
              AND sub.uid IS NOT NULL;
 
@@ -3005,6 +3031,7 @@ async function startServer() {
           UPDATE sales_data s SET account_id = a.id
             FROM accounts a
            WHERE s.account_id IS NULL
+             AND s.imported_from_accountedge = true
              AND a.deleted_at IS NULL
              AND LOWER(TRIM(s.customer_name)) = LOWER(TRIM(a.shop_name));
 

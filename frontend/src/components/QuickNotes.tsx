@@ -52,6 +52,25 @@ function getColorClasses(color: string) {
   return COLORS.find(c => c.value === color) || COLORS[0];
 }
 
+// Convert datetime-local value (no timezone) to ISO string with local timezone offset
+// so PostgreSQL stores the correct moment in time, not UTC-interpreted local time.
+function localDateTimeToISO(dtLocal: string): string {
+  if (!dtLocal) return '';
+  const d = new Date(dtLocal);        // JS parses "YYYY-MM-DDTHH:mm" as local time
+  return d.toISOString();              // toISOString outputs the correct UTC instant
+}
+
+// Convert an ISO/UTC date string back to datetime-local format for the input
+function isoToLocalDatetime(iso: string): string {
+  const d = new Date(iso);
+  const y = d.getFullYear();
+  const mo = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  const h = String(d.getHours()).padStart(2, '0');
+  const mi = String(d.getMinutes()).padStart(2, '0');
+  return `${y}-${mo}-${day}T${h}:${mi}`;
+}
+
 function timeAgo(date: string) {
   const diff = Date.now() - new Date(date).getTime();
   const mins = Math.floor(diff / 60000);
@@ -78,6 +97,8 @@ export default function QuickNotes() {
   const [shareNoteId, setShareNoteId] = useState<number | null>(null);
   const [shareUsers, setShareUsers] = useState<ShareableUser[]>([]);
   const [colorPickerId, setColorPickerId] = useState<number | null>(null);
+  const [editReminderId, setEditReminderId] = useState<number | null>(null);
+  const [editReminderValue, setEditReminderValue] = useState('');
 
   // Voice recording state
   const [recording, setRecording] = useState(false);
@@ -132,7 +153,7 @@ export default function QuickNotes() {
     try {
       const res = await api.post('/notes', {
         content: content || (pendingFiles.length > 0 ? '(Attachment)' : ''),
-        reminder_at: newReminder || null,
+        reminder_at: newReminder ? localDateTimeToISO(newReminder) : null,
         color: newColor,
       });
       // Upload voice recording if present
@@ -778,16 +799,59 @@ export default function QuickNotes() {
                     </div>
                   )}
 
-                  {/* Reminder badge */}
-                  {note.reminder_at && !note.completed_at && (
-                    <div className={`mt-2 flex items-center gap-1 text-[10px] font-medium ${
-                      new Date(note.reminder_at) <= new Date() ? 'text-red-600' : 'text-navy-500'
-                    }`}>
+                  {/* Reminder badge — click to edit */}
+                  {note.reminder_at && !note.completed_at && editReminderId !== note.id && (
+                    <button
+                      onClick={() => { setEditReminderId(note.id); setEditReminderValue(isoToLocalDatetime(note.reminder_at!)); }}
+                      className={`mt-2 flex items-center gap-1 text-[10px] font-medium hover:underline ${
+                        new Date(note.reminder_at) <= new Date() ? 'text-red-600' : 'text-navy-500'
+                      }`}
+                      title="Click to edit reminder"
+                    >
                       <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
                       </svg>
                       {new Date(note.reminder_at) <= new Date() ? 'Due! ' : ''}
                       {new Date(note.reminder_at).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}
+                      <svg className="w-2.5 h-2.5 ml-0.5 opacity-50" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
+                      </svg>
+                    </button>
+                  )}
+                  {/* Inline reminder editor */}
+                  {editReminderId === note.id && (
+                    <div className="mt-2 flex items-center gap-1.5">
+                      <input
+                        type="datetime-local"
+                        value={editReminderValue}
+                        onChange={(e) => setEditReminderValue(e.target.value)}
+                        className="flex-1 px-2 py-1 rounded border border-navy-200 text-[11px] outline-none focus:border-brand-400"
+                      />
+                      <button
+                        onClick={() => {
+                          updateNote(note.id, { reminder_at: editReminderValue ? localDateTimeToISO(editReminderValue) : null } as any);
+                          setEditReminderId(null);
+                        }}
+                        className="px-2 py-1 rounded bg-brand-600 text-white text-[10px] font-medium hover:bg-brand-700"
+                      >
+                        Save
+                      </button>
+                      <button
+                        onClick={() => {
+                          updateNote(note.id, { reminder_at: null } as any);
+                          setEditReminderId(null);
+                        }}
+                        className="px-1.5 py-1 rounded text-red-500 text-[10px] font-medium hover:bg-red-50"
+                        title="Remove reminder"
+                      >
+                        Remove
+                      </button>
+                      <button
+                        onClick={() => setEditReminderId(null)}
+                        className="px-1.5 py-1 rounded text-navy-400 text-[10px] hover:bg-navy-100"
+                      >
+                        Cancel
+                      </button>
                     </div>
                   )}
 
@@ -829,6 +893,25 @@ export default function QuickNotes() {
                         >
                           <svg className="w-3.5 h-3.5" fill={note.is_pinned ? 'currentColor' : 'none'} stroke="currentColor" viewBox="0 0 24 24">
                             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 12V4h1V2H7v2h1v8l-2 2v2h5.2v6h1.6v-6H18v-2l-2-2z" />
+                          </svg>
+                        </button>
+                      )}
+                      {/* Reminder */}
+                      {note.is_owner !== false && (
+                        <button
+                          onClick={() => {
+                            if (editReminderId === note.id) {
+                              setEditReminderId(null);
+                            } else {
+                              setEditReminderId(note.id);
+                              setEditReminderValue(note.reminder_at ? isoToLocalDatetime(note.reminder_at) : '');
+                            }
+                          }}
+                          title={note.reminder_at ? 'Edit reminder' : 'Set reminder'}
+                          className={`p-1 rounded hover:bg-navy-100 transition-colors ${note.reminder_at ? 'text-brand-500' : 'text-navy-400 hover:text-brand-500'}`}
+                        >
+                          <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
                           </svg>
                         </button>
                       )}

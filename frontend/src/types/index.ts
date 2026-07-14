@@ -41,7 +41,7 @@ export interface Account {
   rep_last_name?: string;
   secondary_rep_first_name?: string;
   secondary_rep_last_name?: string;
-  status: 'prospect' | 'active' | 'cold' | 'dnc' | 'churned';
+  status: 'prospect' | 'active' | 'cold' | 'dnc' | 'churned' | 'inactive';
   suppliers: string | null;
   paint_line: string | null;
   allied_products: string | null;
@@ -136,14 +136,15 @@ export interface Pagination {
   totalPages?: number;
 }
 
-export type StatusType = 'prospect' | 'active' | 'cold' | 'dnc' | 'churned';
+export type StatusType = 'prospect' | 'active' | 'cold' | 'dnc' | 'churned' | 'inactive';
 
 export const STATUS_LABELS: Record<StatusType, string> = {
   prospect: 'Prospect',
   active: 'Active Customer',
   cold: 'Cold',
   dnc: 'Do Not Contact',
-  churned: 'Churned'
+  churned: 'Churned',
+  inactive: 'Inactive'
 };
 
 export const STATUS_COLORS: Record<StatusType, string> = {
@@ -151,5 +152,6 @@ export const STATUS_COLORS: Record<StatusType, string> = {
   active: 'badge-active',
   cold: 'badge-cold',
   dnc: 'badge-dnc',
-  churned: 'badge-churned'
+  churned: 'badge-churned',
+  inactive: 'bg-gray-100 text-gray-600'
 };

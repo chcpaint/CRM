@@ -25,6 +25,13 @@ export default function AccountsPage({ user }: Props) {
   const isManager = user.role === 'admin' || user.role === 'manager';
   // Reps default to "my accounts"; managers/admins default to "all"
   const [myAccountsOnly, setMyAccountsOnly] = useState(!isManager);
+  // Rep filter
+  const [repFilter, setRepFilter] = useState('');
+  const [reps, setReps] = useState<{ id: number; first_name: string; last_name: string }[]>([]);
+  // Dormant filter
+  const [dormantOnly, setDormantOnly] = useState(false);
+  // Show inactive toggle
+  const [showInactive, setShowInactive] = useState(false);
 
   // Debounce timer ref for live search
   const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -45,6 +52,19 @@ export default function AccountsPage({ user }: Props) {
   branchFilterRef.current = branchFilter;
   const myAccountsOnlyRef = useRef(myAccountsOnly);
   myAccountsOnlyRef.current = myAccountsOnly;
+  const repFilterRef = useRef(repFilter);
+  repFilterRef.current = repFilter;
+  const dormantOnlyRef = useRef(dormantOnly);
+  dormantOnlyRef.current = dormantOnly;
+  const showInactiveRef = useRef(showInactive);
+  showInactiveRef.current = showInactive;
+
+  // Load reps list for filter dropdown
+  useEffect(() => {
+    api.get('/auth/users').then((data: any) => {
+      if (data.users) setReps(data.users.filter((u: any) => u.is_active));
+    }).catch(() => {});
+  }, []);
 
   const loadAccounts = useCallback(async (overrides?: { search?: string; page?: number }) => {
     const thisLoadId = ++loadIdRef.current;
@@ -56,8 +76,15 @@ export default function AccountsPage({ user }: Props) {
         category: categoryRef.current
       };
       if (myAccountsOnlyRef.current) params.my_accounts = 'true';
-      if (statusFilterRef.current) params.status = statusFilterRef.current;
+      if (showInactiveRef.current) {
+        params.status = 'inactive';
+        params.include_inactive = 'true';
+      } else if (statusFilterRef.current) {
+        params.status = statusFilterRef.current;
+      }
       if (branchFilterRef.current) params.branch = branchFilterRef.current;
+      if (repFilterRef.current) params.assigned_rep_id = repFilterRef.current;
+      if (dormantOnlyRef.current) params.dormant_only = 'true';
       const s = overrides?.search ?? searchRef.current;
       if (s) params.search = s;
       const data = await api.get('/accounts', params);
@@ -76,7 +103,7 @@ export default function AccountsPage({ user }: Props) {
 
   useEffect(() => {
     loadAccounts();
-  }, [page, statusFilter, category, branchFilter, myAccountsOnly]);
+  }, [page, statusFilter, category, branchFilter, myAccountsOnly, repFilter, dormantOnly, showInactive]);
 
   // Live search: debounce 400ms after typing
   useEffect(() => {
@@ -144,6 +171,28 @@ export default function AccountsPage({ user }: Props) {
   };
 
   const BRANCHES = ['Hamilton', 'Markham', 'Oakville', 'Ottawa', 'St. Catharines', 'Woodbridge'];
+
+  const isDormant = (account: Account) => {
+    if (!account.last_contacted_at) return true;
+    const diff = Date.now() - new Date(account.last_contacted_at).getTime();
+    return diff > 30 * 24 * 60 * 60 * 1000;
+  };
+
+  const dormantDays = (account: Account) => {
+    if (!account.last_contacted_at) return 'Never contacted';
+    const days = Math.floor((Date.now() - new Date(account.last_contacted_at).getTime()) / (24 * 60 * 60 * 1000));
+    return `${days}d ago`;
+  };
+
+  const toggleActive = async (account: Account, e?: React.MouseEvent) => {
+    if (e) e.stopPropagation();
+    try {
+      await api.patch(`/accounts/${account.id}/toggle-active`);
+      loadAccounts();
+    } catch (err) {
+      console.error('Toggle failed:', err);
+    }
+  };
 
   return (
     <div>
@@ -229,6 +278,17 @@ export default function AccountsPage({ user }: Props) {
               ))}
             </select>
           )}
+          {/* Salesperson filter */}
+          <select
+            value={repFilter}
+            onChange={(e) => { setRepFilter(e.target.value); setMyAccountsOnly(false); setPage(1); }}
+            className="input-field w-auto"
+          >
+            <option value="">All Reps</option>
+            {reps.map(r => (
+              <option key={r.id} value={r.id}>{r.first_name} {r.last_name}</option>
+            ))}
+          </select>
           <select
             value={branchFilter}
             onChange={(e) => { setBranchFilter(e.target.value); setPage(1); }}
@@ -242,7 +302,7 @@ export default function AccountsPage({ user }: Props) {
           {/* My Accounts / All toggle */}
           <div className="flex items-center bg-navy-100 rounded-lg p-0.5">
             <button
-              onClick={() => { setMyAccountsOnly(true); setPage(1); }}
+              onClick={() => { setMyAccountsOnly(true); setRepFilter(''); setPage(1); }}
               className={`px-3 py-1.5 rounded-md text-xs font-semibold transition-all ${
                 myAccountsOnly
                   ? 'bg-white text-navy-900 shadow-sm'
@@ -265,6 +325,33 @@ export default function AccountsPage({ user }: Props) {
             )}
           </div>
         </div>
+        {/* Second row: quick-filter badges */}
+        {category === 'customer' && (
+          <div className="flex flex-wrap gap-2 mt-3 pt-3 border-t border-navy-100">
+            <button
+              onClick={() => { setDormantOnly(!dormantOnly); setPage(1); }}
+              className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold transition-all border ${
+                dormantOnly
+                  ? 'bg-amber-100 text-amber-800 border-amber-300'
+                  : 'bg-white text-navy-500 border-navy-200 hover:bg-amber-50 hover:text-amber-700 hover:border-amber-200'
+              }`}
+            >
+              <span className="w-2 h-2 rounded-full bg-amber-500" />
+              Dormant (30+ days)
+            </button>
+            <button
+              onClick={() => { setShowInactive(!showInactive); setPage(1); }}
+              className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold transition-all border ${
+                showInactive
+                  ? 'bg-gray-200 text-gray-800 border-gray-400'
+                  : 'bg-white text-navy-500 border-navy-200 hover:bg-gray-100 hover:text-gray-700 hover:border-gray-300'
+              }`}
+            >
+              <span className="w-2 h-2 rounded-full bg-gray-400" />
+              Show Inactive
+            </button>
+          </div>
+        )}
       </div>
 
       {/* Account list */}
@@ -300,13 +387,22 @@ export default function AccountsPage({ user }: Props) {
                       <div className="text-sm text-navy-400 mt-0.5">{account.contact_names}</div>
                     )}
                   </div>
-                  {category === 'lead' ? (
-                    <span className={`badge ${STATUS_COLORS[account.status]} flex-shrink-0`}>
-                      {STATUS_LABELS[account.status]}
-                    </span>
-                  ) : (
-                    <span className="badge badge-active flex-shrink-0">Customer</span>
-                  )}
+                  <div className="flex flex-col items-end gap-1 flex-shrink-0">
+                    {category === 'lead' ? (
+                      <span className={`badge ${STATUS_COLORS[account.status]}`}>
+                        {STATUS_LABELS[account.status]}
+                      </span>
+                    ) : account.status === 'inactive' ? (
+                      <span className="badge bg-gray-100 text-gray-600">Inactive</span>
+                    ) : (
+                      <span className="badge badge-active">Customer</span>
+                    )}
+                    {category === 'customer' && isDormant(account) && account.status !== 'inactive' && (
+                      <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-semibold bg-amber-100 text-amber-700 border border-amber-200">
+                        Dormant &middot; {dormantDays(account)}
+                      </span>
+                    )}
+                  </div>
                 </div>
                 {/* Large contact action buttons — tap to call/text/email + auto-log */}
                 <div className="grid grid-cols-3 gap-2 mt-3 pt-3 border-t border-navy-100">
@@ -366,11 +462,27 @@ export default function AccountsPage({ user }: Props) {
                     )}
                   </div>
                 )}
-                <div className="text-xs mt-1.5 text-right">
-                  {account.rep_first_name
-                    ? <span className="text-navy-500 font-medium">Rep: {account.rep_first_name} {account.rep_last_name}</span>
-                    : <span className="text-navy-300">Unassigned</span>
-                  }
+                <div className="flex justify-between items-center text-xs mt-1.5">
+                  <div>
+                    {category === 'customer' && (
+                      <button
+                        onClick={e => toggleActive(account, e)}
+                        className={`px-2 py-1 rounded text-[11px] font-medium transition-colors ${
+                          account.status === 'inactive'
+                            ? 'bg-green-50 text-green-700 border border-green-200 hover:bg-green-100'
+                            : 'bg-gray-50 text-gray-500 border border-gray-200 hover:bg-gray-100'
+                        }`}
+                      >
+                        {account.status === 'inactive' ? 'Reactivate' : 'Mark Inactive'}
+                      </button>
+                    )}
+                  </div>
+                  <div className="text-right">
+                    {account.rep_first_name
+                      ? <span className="text-navy-500 font-medium">Rep: {account.rep_first_name} {account.rep_last_name}</span>
+                      : <span className="text-navy-300">Unassigned</span>
+                    }
+                  </div>
                 </div>
               </div>
             ))}
@@ -387,9 +499,7 @@ export default function AccountsPage({ user }: Props) {
                   <th className="text-left py-3 px-4 text-xs font-medium text-navy-500 uppercase">Contact</th>
                   <th className="text-left py-3 px-4 text-xs font-medium text-navy-500 uppercase">Rep</th>
                   <th className="text-left py-3 px-4 text-xs font-medium text-navy-500 uppercase hidden lg:table-cell">Paint Line</th>
-                  {category === 'lead' && (
-                    <th className="text-left py-3 px-4 text-xs font-medium text-navy-500 uppercase">Status</th>
-                  )}
+                  <th className="text-left py-3 px-4 text-xs font-medium text-navy-500 uppercase">Status</th>
                   <th className="text-left py-3 px-4 text-xs font-medium text-navy-500 uppercase">Actions</th>
                 </tr>
               </thead>
@@ -408,15 +518,26 @@ export default function AccountsPage({ user }: Props) {
                       {account.rep_first_name ? `${account.rep_first_name} ${account.rep_last_name}` : <span className="text-navy-300">Unassigned</span>}
                     </td>
                     <td className="py-3 px-4 text-sm text-navy-500 hidden lg:table-cell">{account.paint_line || '-'}</td>
-                    {category === 'lead' && (
-                      <td className="py-3 px-4">
-                        <span className={`badge ${STATUS_COLORS[account.status]}`}>
-                          {STATUS_LABELS[account.status]}
-                        </span>
-                      </td>
-                    )}
                     <td className="py-3 px-4">
-                      <div className="flex gap-2">
+                      <div className="flex flex-wrap gap-1">
+                        {category === 'lead' ? (
+                          <span className={`badge ${STATUS_COLORS[account.status]}`}>
+                            {STATUS_LABELS[account.status]}
+                          </span>
+                        ) : account.status === 'inactive' ? (
+                          <span className="badge bg-gray-100 text-gray-600">Inactive</span>
+                        ) : (
+                          <span className="badge badge-active">Active</span>
+                        )}
+                        {category === 'customer' && isDormant(account) && account.status !== 'inactive' && (
+                          <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-semibold bg-amber-100 text-amber-700 border border-amber-200">
+                            Dormant &middot; {dormantDays(account)}
+                          </span>
+                        )}
+                      </div>
+                    </td>
+                    <td className="py-3 px-4">
+                      <div className="flex gap-2 items-center">
                         {account.phone && (
                           <>
                             <a href={`tel:${account.phone.replace(/[^\d+]/g, '')}`} className="text-green-600 hover:text-green-700 text-sm" title="Call">
@@ -431,6 +552,19 @@ export default function AccountsPage({ user }: Props) {
                           <a href={`mailto:${account.email}`} className="text-purple-600 hover:text-purple-700 text-sm" title="Email">
                             Email
                           </a>
+                        )}
+                        {category === 'customer' && (
+                          <button
+                            onClick={() => toggleActive(account)}
+                            className={`ml-1 px-2 py-0.5 rounded text-[11px] font-medium transition-colors ${
+                              account.status === 'inactive'
+                                ? 'bg-green-50 text-green-700 border border-green-200 hover:bg-green-100'
+                                : 'bg-gray-50 text-gray-500 border border-gray-200 hover:bg-gray-100'
+                            }`}
+                            title={account.status === 'inactive' ? 'Reactivate this account' : 'Mark as inactive'}
+                          >
+                            {account.status === 'inactive' ? 'Reactivate' : 'Inactive'}
+                          </button>
                         )}
                       </div>
                     </td>

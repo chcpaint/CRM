@@ -39,7 +39,7 @@ const accountUpdateSchema = z.object({
   account_type: z.enum(['collision', 'mechanical', 'dealership', 'restoration', 'other']).optional(),
   assigned_rep_id: intOrNull,
   secondary_rep_id: intOrNull,
-  status: z.enum(['prospect', 'active', 'cold', 'dnc', 'churned', 'on_hold']).optional(),
+  status: z.enum(['prospect', 'active', 'cold', 'dnc', 'churned', 'on_hold', 'inactive']).optional(),
   suppliers: shortStr(500).nullable().optional(),
   paint_line: shortStr(200).nullable().optional(),
   allied_products: shortStr(500).nullable().optional(),
@@ -489,10 +489,16 @@ async function startServer() {
     try {
       const { status, assigned_rep_id, city, search, category, branch, my_accounts, page = '1', limit = '50' } = req.query;
       const pg = parseInt(page); const lim = parseInt(limit); const off = (pg-1)*lim;
+      const { include_inactive, dormant_only } = req.query;
       let where = ['a.deleted_at IS NULL']; let params = []; let idx = 1;
+      if (dormant_only === 'true') {
+        where.push(`(a.last_contacted_at IS NULL OR a.last_contacted_at < NOW() - INTERVAL '30 days')`);
+      }
       if (category) { where.push(`a.account_category = $${idx++}`); params.push(category); }
       if (branch) { where.push(`a.branch ILIKE $${idx++}`); params.push(`%${branch}%`); }
       if (status) { where.push(`a.status = $${idx++}`); params.push(status); }
+      // Exclude inactive accounts by default unless filter explicitly requests them
+      if (!status && include_inactive !== 'true') { where.push(`a.status != 'inactive'`); }
       // Filter to accounts where user is primary OR secondary rep
       if (my_accounts === 'true') {
         where.push(`(a.assigned_rep_id = $${idx} OR a.secondary_rep_id = $${idx+1})`);
@@ -524,6 +530,18 @@ async function startServer() {
     const rows = accounts.map(a => `"${a.shop_name}","${a.city||''}","${a.contact_names||''}","${a.phone||''}","${a.email||''}","${a.status}","${a.rfn||''} ${a.rln||''}"`).join('\n');
     res.setHeader('Content-Type','text/csv'); res.setHeader('Content-Disposition','attachment; filename=accounts.csv');
     res.send(hdr + rows);
+  });
+
+  // ─── TOGGLE ACCOUNT ACTIVE/INACTIVE ───
+  app.patch('/api/accounts/:id/toggle-active', authenticate, async (req, res) => {
+    try {
+      const account = await queryOne('SELECT id, status, shop_name FROM accounts WHERE id=$1 AND deleted_at IS NULL', [req.params.id]);
+      if (!account) return res.status(404).json({ error: 'Not found' });
+      const newStatus = account.status === 'inactive' ? 'active' : 'inactive';
+      await queryOne('UPDATE accounts SET status=$1, updated_at=NOW() WHERE id=$2 RETURNING *', [newStatus, req.params.id]);
+      await logAudit(req, 'account', account.id, 'toggle_active', { from: account.status, to: newStatus });
+      res.json({ success: true, newStatus });
+    } catch (e) { res.status(500).json({ error: e.message }); }
   });
 
   app.get('/api/accounts/:id', authenticate, async (req, res) => {

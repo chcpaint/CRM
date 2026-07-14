@@ -1079,12 +1079,21 @@ async function startServer() {
         rows = await queryAll(`
           WITH sp_items AS (
             SELECT COALESCE(s.rep_id::text, s.salesperson) as group_key,
-                   MAX(s.salesperson) as salesperson, s.branch, s.month,
+                   s.branch, s.month,
                    SUM(s.sale_amount) as sp_amount
             FROM sales_data s
             WHERE s.salesperson IS NOT NULL AND s.salesperson != ''
               AND s.sale_date >= $1 || '-01-01' AND s.sale_date <= $1 || '-12-31'
             GROUP BY group_key, s.branch, s.month
+          ),
+          -- Pick a single display name per group_key (prefer the longest / most complete name)
+          sp_names AS (
+            SELECT COALESCE(s.rep_id::text, s.salesperson) as group_key,
+                   MAX(s.salesperson) as salesperson
+            FROM sales_data s
+            WHERE s.salesperson IS NOT NULL AND s.salesperson != ''
+              AND s.sale_date >= $1 || '-01-01' AND s.sale_date <= $1 || '-12-31'
+            GROUP BY COALESCE(s.rep_id::text, s.salesperson)
           ),
           branch_items AS (
             SELECT month, branch, SUM(sale_amount) as branch_amount
@@ -1099,7 +1108,7 @@ async function startServer() {
             WHERE month >= $1 || '-01' AND month <= $1 || '-12'
             GROUP BY month, branch_name
           )
-          SELECT sp.salesperson,
+          SELECT sn.salesperson,
                  SUM(CASE WHEN bi.branch_amount > 0
                    THEN sp.sp_amount / bi.branch_amount * br.actual_revenue
                    ELSE sp.sp_amount END) as ytd_revenue,
@@ -1109,9 +1118,10 @@ async function startServer() {
                    THEN sp.sp_amount
                    ELSE 0 END) as month_revenue
           FROM sp_items sp
+          JOIN sp_names sn ON sn.group_key = sp.group_key
           LEFT JOIN branch_items bi ON bi.month = sp.month AND bi.branch = sp.branch
           LEFT JOIN branch_rev br ON br.month = sp.month AND br.branch = sp.branch
-          GROUP BY sp.salesperson
+          GROUP BY sn.salesperson
           ORDER BY ytd_revenue DESC
         `, [year, currentMonth]);
       }

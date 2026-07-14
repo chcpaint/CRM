@@ -1324,12 +1324,13 @@ async function startServer() {
         isRep ? [uid] : []);
 
       // Active buyers: distinct customers with purchases in the last 6 months
+      // sale_date is text ('YYYY-MM-DD'), so cast to date for comparison
       const activeBuyers = await queryOne(
         isRep
           ? `SELECT COUNT(DISTINCT customer_name) as count FROM sales_data
-             WHERE sale_date >= NOW() - INTERVAL '6 months' AND rep_id = $1`
+             WHERE sale_date::date >= (CURRENT_DATE - INTERVAL '6 months') AND rep_id = $1`
           : `SELECT COUNT(DISTINCT customer_name) as count FROM sales_data
-             WHERE sale_date >= NOW() - INTERVAL '6 months'`,
+             WHERE sale_date::date >= (CURRENT_DATE - INTERVAL '6 months')`,
         isRep ? [uid] : []);
 
       // Total customers in system (account_category = 'customer', not deleted, not inactive)

@@ -127,6 +127,8 @@ export interface DashboardMetrics {
   recentActivities: (Activity & { entry_type?: 'activity' | 'note' })[];
   dormantCount: number;
   totalAccounts: number;
+  activeBuyers: number;
+  customersInSystem: number;
 }
 
 export interface Pagination {

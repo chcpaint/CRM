@@ -1323,13 +1323,31 @@ async function startServer() {
           : "SELECT COUNT(*) as count FROM accounts WHERE deleted_at IS NULL AND status = 'active' AND (last_contacted_at IS NULL OR last_contacted_at < NOW() - INTERVAL '30 days')",
         isRep ? [uid] : []);
 
+      // Active buyers: distinct customers with purchases in the last 6 months
+      const activeBuyers = await queryOne(
+        isRep
+          ? `SELECT COUNT(DISTINCT customer_name) as count FROM sales_data
+             WHERE sale_date >= NOW() - INTERVAL '6 months' AND rep_id = $1`
+          : `SELECT COUNT(DISTINCT customer_name) as count FROM sales_data
+             WHERE sale_date >= NOW() - INTERVAL '6 months'`,
+        isRep ? [uid] : []);
+
+      // Total customers in system (account_category = 'customer', not deleted, not inactive)
+      const customersInSystem = await queryOne(
+        isRep
+          ? "SELECT COUNT(*) as count FROM accounts WHERE deleted_at IS NULL AND account_category = 'customer' AND status != 'inactive' AND assigned_rep_id = $1"
+          : "SELECT COUNT(*) as count FROM accounts WHERE deleted_at IS NULL AND account_category = 'customer' AND status != 'inactive'",
+        isRep ? [uid] : []);
+
       res.json({
         statusCounts: statusCounts.map(r => ({ ...r, count: parseInt(r.count) })),
         monthlyRevenue: monthlyRevenue.reverse().map(r => ({ ...r, total: parseFloat(r.total), count: parseInt(r.count) })),
         topAccounts: topAccounts.map(r => ({ ...r, total_revenue: parseFloat(r.total_revenue), sale_count: parseInt(r.sale_count) })),
         recentActivities,
         dormantCount: parseInt(dormantCount?.count) || 0,
-        totalAccounts: statusCounts.reduce((s, c) => s + parseInt(c.count), 0)
+        totalAccounts: statusCounts.reduce((s, c) => s + parseInt(c.count), 0),
+        activeBuyers: parseInt(activeBuyers?.count) || 0,
+        customersInSystem: parseInt(customersInSystem?.count) || 0
       });
     } catch (e) { res.status(500).json({ error: e.message }); }
   });

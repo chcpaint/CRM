@@ -131,10 +131,8 @@ export default function DashboardPage({ user }: Props) {
   const currentMonthKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
   const currentMonth = metrics.monthlyRevenue.find((m) => m.month === currentMonthKey) || { month: currentMonthKey, total: 0, count: 0 };
 
-  // Show ACTIVE accounts on the KPI card (previously showed every row including cold / DNC / churned,
-  // which inflated the number past 1,800 and misrepresented the book of business).
-  const activeAccounts =
-    metrics.statusCounts.find((s) => s.status === 'active')?.count || 0;
+  // Active Accounts = distinct customers who bought from CHC in the last 6 months (from sales_data)
+  const activeAccounts = metrics.activeBuyers || 0;
   // Keep the all-accounts total for pipeline percentage math so the bars still add up to 100%.
   const pipelineTotal = metrics.totalAccounts;
 
@@ -220,12 +218,12 @@ export default function DashboardPage({ user }: Props) {
         <div className="card !p-4 sm:!p-6 group hover:scale-[1.02]">
           <div className="text-xs sm:text-sm text-navy-500 mb-1 font-medium">Active Accounts</div>
           <div className="text-xl sm:text-2xl font-bold text-navy-900">{activeAccounts}</div>
-          <div className="text-[10px] sm:text-xs text-navy-400 mt-1">Status = Active</div>
+          <div className="text-[10px] sm:text-xs text-navy-400 mt-1">Bought in last 6 months</div>
         </div>
         <div className="card !p-4 sm:!p-6 group hover:scale-[1.02]">
-          <div className="text-xs sm:text-sm text-navy-500 mb-1 font-medium">No Activity for 30 days</div>
-          <div className="text-xl sm:text-2xl font-bold text-brand-600">{metrics.dormantCount}</div>
-          <div className="text-[10px] sm:text-xs text-navy-400 mt-1">Active accounts with no note or activity in 30+ days</div>
+          <div className="text-xs sm:text-sm text-navy-500 mb-1 font-medium">Customers in System</div>
+          <div className="text-xl sm:text-2xl font-bold text-brand-600">{metrics.customersInSystem || 0}</div>
+          <div className="text-[10px] sm:text-xs text-navy-400 mt-1">Total active customer accounts</div>
         </div>
         <div className="card !p-4 sm:!p-6 group hover:scale-[1.02]">
           <div className="text-xs sm:text-sm text-navy-500 mb-1 font-medium">This Month</div>

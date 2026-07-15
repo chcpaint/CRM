@@ -460,14 +460,15 @@ export default function QuickNotes() {
         </button>
       )}
 
-      {/* Mobile FAB */}
+      {/* Mobile FAB — stacked above the BodyShopWiz FAB (which sits at bottom:80) */}
       {!open && (
         <button
           onClick={() => setOpen(true)}
-          className="lg:hidden fixed right-4 bottom-20 z-40
+          className="lg:hidden fixed z-40
             w-12 h-12 bg-brand-600 hover:bg-brand-700 text-white
             rounded-full shadow-xl flex items-center justify-center
             transition-all duration-200 active:scale-95"
+          style={{ right: 16, bottom: 144 }}
         >
           <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />

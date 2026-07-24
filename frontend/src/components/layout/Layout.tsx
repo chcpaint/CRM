@@ -28,6 +28,7 @@ export default function Layout({ user, onLogout, children }: LayoutProps) {
 
   // Overflow items — shown in sidebar + mobile "More" sheet
   const secondaryNav = [
+    { path: '/weekly-report', label: 'Weekly Report', icon: '\u{1F4DD}' },
     { path: '/holds', label: 'On Hold', icon: '\u{26D4}' },
     { path: '/customer-alerts', label: 'Customer Alerts', icon: '\u{26A0}\u{FE0F}' },
     { path: '/competitive-market-info', label: 'Competitive Market Info', icon: '\u{1F4C9}' },

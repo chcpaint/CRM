@@ -2663,6 +2663,583 @@ async function startServer() {
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
 
+
+  // ─── WEEKLY REPORTS ───
+
+  // Helper: get Monday of the current week (or any given date)
+  function getMonday(d) {
+    const date = new Date(d || new Date());
+    const day = date.getDay();
+    const diff = date.getDate() - day + (day === 0 ? -6 : 1);
+    const monday = new Date(date);
+    monday.setDate(diff);
+    monday.setHours(0, 0, 0, 0);
+    return monday;
+  }
+
+  function formatWeekDate(d) {
+    return d.toISOString().slice(0, 10);
+  }
+
+  function getSunday(monday) {
+    const sun = new Date(monday);
+    sun.setDate(sun.getDate() + 6);
+    sun.setHours(23, 59, 59, 999);
+    return sun;
+  }
+
+  async function computeWeeklyStats(repId, weekOf) {
+    const monday = new Date(weekOf);
+    const sunday = getSunday(monday);
+    const mondayStr = formatWeekDate(monday);
+    const sundayStr = formatWeekDate(sunday);
+
+    const [contacted, newAccts, activitiesLogged, followUpsDue, weeklySales, dormant] = await Promise.all([
+      queryOne(
+        `SELECT COUNT(DISTINCT account_id) AS cnt FROM activities
+         WHERE rep_id = $1 AND created_at >= $2 AND created_at < ($3::date + INTERVAL '1 day')`,
+        [repId, mondayStr, sundayStr]
+      ),
+      queryOne(
+        `SELECT COUNT(*) AS cnt FROM accounts
+         WHERE assigned_rep_id = $1 AND created_at >= $2 AND created_at < ($3::date + INTERVAL '1 day') AND deleted_at IS NULL`,
+        [repId, mondayStr, sundayStr]
+      ),
+      queryOne(
+        `SELECT COUNT(*) AS cnt FROM activities
+         WHERE rep_id = $1 AND created_at >= $2 AND created_at < ($3::date + INTERVAL '1 day')`,
+        [repId, mondayStr, sundayStr]
+      ),
+      queryOne(
+        `SELECT COUNT(*) AS cnt FROM accounts
+         WHERE assigned_rep_id = $1 AND deleted_at IS NULL
+           AND follow_up_date IS NOT NULL AND follow_up_date >= $2 AND follow_up_date <= $3`,
+        [repId, mondayStr, sundayStr]
+      ),
+      queryOne(
+        `SELECT COALESCE(SUM(sale_amount), 0) AS total FROM sales_data
+         WHERE rep_id = $1 AND sale_date >= $2 AND sale_date <= $3`,
+        [repId, mondayStr, sundayStr]
+      ),
+      queryOne(
+        `SELECT COUNT(*) AS cnt FROM accounts
+         WHERE assigned_rep_id = $1 AND status = 'active' AND deleted_at IS NULL
+           AND (last_contacted_at IS NULL OR last_contacted_at < NOW() - INTERVAL '30 days')`,
+        [repId]
+      ),
+    ]);
+
+    return {
+      stats_accounts_contacted: parseInt(contacted.cnt, 10) || 0,
+      stats_new_accounts: parseInt(newAccts.cnt, 10) || 0,
+      stats_activities_logged: parseInt(activitiesLogged.cnt, 10) || 0,
+      stats_follow_ups_due: parseInt(followUpsDue.cnt, 10) || 0,
+      stats_weekly_sales: parseFloat(weeklySales.total) || 0,
+      stats_dormant_accounts: parseInt(dormant.cnt, 10) || 0,
+    };
+  }
+
+  function buildReportEmail(report, repName) {
+    const weekOfFormatted = new Date(report.week_of).toLocaleDateString('en-US', {
+      year: 'numeric', month: 'long', day: 'numeric',
+    });
+
+    const statRows = [
+      ['Accounts Contacted', report.stats_accounts_contacted],
+      ['New Accounts', report.stats_new_accounts],
+      ['Activities Logged', report.stats_activities_logged],
+      ['Follow-Ups Due', report.stats_follow_ups_due],
+      ['Weekly Sales', `$${Number(report.stats_weekly_sales).toLocaleString('en-US', { minimumFractionDigits: 2 })}`],
+      ['Dormant Accounts (30+ days)', report.stats_dormant_accounts],
+    ];
+
+    const surveyFields = [
+      ['Sales Opportunities', report.sales_opportunities],
+      ['Product Opportunities', report.product_opportunities],
+      ['Competitive Opportunities', report.competitive_opportunities],
+      ['Equipment Opportunities', report.equipment_opportunities],
+      ['Planned Follow-Ups', report.planned_follow_ups],
+      ['Management Support Needed', report.mgmt_support_needed],
+      ['Additional Info', report.additional_info],
+    ];
+
+    return `
+      <div style="font-family: Arial, Helvetica, sans-serif; max-width: 680px; margin: 0 auto; color: #1f2937;">
+        <div style="background-color: #1e3a8a; padding: 24px 32px; border-radius: 8px 8px 0 0;">
+          <h1 style="margin: 0; color: #ffffff; font-size: 22px;">Weekly Report</h1>
+          <p style="margin: 6px 0 0 0; color: #bfdbfe; font-size: 14px;">${repName} &mdash; Week of ${weekOfFormatted}</p>
+        </div>
+        <div style="border: 1px solid #e5e7eb; border-top: none; border-radius: 0 0 8px 8px; padding: 28px 32px;">
+          <h2 style="font-size: 16px; color: #1e3a8a; border-bottom: 2px solid #1e3a8a; padding-bottom: 6px; margin-top: 0;">CRM Activity Stats</h2>
+          <table style="width: 100%; border-collapse: collapse; margin-bottom: 28px;">
+            ${statRows.map(([label, val]) => `
+              <tr>
+                <td style="padding: 8px 12px; border-bottom: 1px solid #f3f4f6; font-size: 14px; color: #374151;">${label}</td>
+                <td style="padding: 8px 12px; border-bottom: 1px solid #f3f4f6; font-size: 14px; font-weight: 600; text-align: right; color: #1e3a8a;">${val}</td>
+              </tr>
+            `).join('')}
+          </table>
+          <h2 style="font-size: 16px; color: #1e3a8a; border-bottom: 2px solid #1e3a8a; padding-bottom: 6px;">Rep Commentary</h2>
+          ${surveyFields.map(([label, val]) => `
+            <div style="margin-bottom: 18px;">
+              <h3 style="font-size: 13px; text-transform: uppercase; letter-spacing: 0.5px; color: #ef4444; margin: 0 0 4px 0;">${label}</h3>
+              <p style="margin: 0; font-size: 14px; color: #374151; line-height: 1.6; white-space: pre-wrap;">${val || '<span style="color:#9ca3af;">No response</span>'}</p>
+            </div>
+          `).join('')}
+          <div style="margin-top: 24px; padding-top: 16px; border-top: 1px solid #e5e7eb; text-align: center;">
+            <p style="margin: 0; font-size: 12px; color: #9ca3af;">Submitted ${report.submitted_at ? new Date(report.submitted_at).toLocaleString('en-US') : 'N/A'} &bull; CHC CRM</p>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  const MGMT_EMAILS = ['adam@chcpaint.com', 'frankc@chcpaint.com', 'manny@chcpaint.com'];
+
+  // GET /api/weekly-report/current
+  app.get('/api/weekly-report/current', authenticate, async (req, res) => {
+    try {
+      const repId = req.user.userId;
+      const monday = getMonday(new Date());
+      const weekOf = formatWeekDate(monday);
+      const sunday = getSunday(monday);
+      const sundayStr = formatWeekDate(sunday);
+
+      let report = await queryOne(
+        `SELECT * FROM weekly_reports WHERE rep_id = $1 AND week_of = $2`,
+        [repId, weekOf]
+      );
+
+      const stats = await computeWeeklyStats(repId, weekOf);
+
+      if (!report) {
+        report = await queryOne(
+          `INSERT INTO weekly_reports (rep_id, week_of, status,
+            stats_accounts_contacted, stats_new_accounts, stats_activities_logged,
+            stats_follow_ups_due, stats_weekly_sales, stats_dormant_accounts)
+           VALUES ($1, $2, 'draft', $3, $4, $5, $6, $7, $8)
+           RETURNING *`,
+          [repId, weekOf, stats.stats_accounts_contacted, stats.stats_new_accounts,
+           stats.stats_activities_logged, stats.stats_follow_ups_due,
+           stats.stats_weekly_sales, stats.stats_dormant_accounts]
+        );
+      } else {
+        report = await queryOne(
+          `UPDATE weekly_reports SET
+            stats_accounts_contacted = $1, stats_new_accounts = $2,
+            stats_activities_logged = $3, stats_follow_ups_due = $4,
+            stats_weekly_sales = $5, stats_dormant_accounts = $6,
+            updated_at = NOW()
+           WHERE id = $7 RETURNING *`,
+          [stats.stats_accounts_contacted, stats.stats_new_accounts,
+           stats.stats_activities_logged, stats.stats_follow_ups_due,
+           stats.stats_weekly_sales, stats.stats_dormant_accounts, report.id]
+        );
+      }
+
+      // CRM highlights: top accounts touched this week
+      const accountsTouched = await queryAll(
+        `SELECT a.shop_name, COUNT(*) AS activity_count
+         FROM activities act
+         JOIN accounts a ON a.id = act.account_id
+         WHERE act.rep_id = $1 AND act.created_at >= $2 AND act.created_at < ($3::date + INTERVAL '1 day')
+         GROUP BY a.shop_name
+         ORDER BY activity_count DESC
+         LIMIT 10`,
+        [repId, weekOf, sundayStr]
+      );
+
+      // CRM highlights: upcoming follow-ups (next 7 days from accounts table)
+      const today = formatWeekDate(new Date());
+      const sevenDaysOut = new Date();
+      sevenDaysOut.setDate(sevenDaysOut.getDate() + 7);
+      const sevenDaysStr = formatWeekDate(sevenDaysOut);
+
+      const upcomingFollowUps = await queryAll(
+        `SELECT a.shop_name, a.follow_up_date
+         FROM accounts a
+         WHERE a.assigned_rep_id = $1 AND a.deleted_at IS NULL
+           AND a.follow_up_date IS NOT NULL
+           AND a.follow_up_date >= $2 AND a.follow_up_date <= $3
+         ORDER BY a.follow_up_date ASC`,
+        [repId, today, sevenDaysStr]
+      );
+
+      res.json({
+        report,
+        crm_highlights: {
+          accounts_touched: accountsTouched,
+          upcoming_follow_ups: upcomingFollowUps,
+        },
+      });
+    } catch (err) {
+      console.error('Error fetching current weekly report:', err);
+      res.status(500).json({ error: 'Failed to load weekly report' });
+    }
+  });
+
+  // PUT /api/weekly-report/save
+  app.put('/api/weekly-report/save', authenticate, async (req, res) => {
+    try {
+      const repId = req.user.userId;
+      const monday = getMonday(new Date());
+      const weekOf = formatWeekDate(monday);
+
+      const {
+        sales_opportunities = '',
+        product_opportunities = '',
+        competitive_opportunities = '',
+        equipment_opportunities = '',
+        planned_follow_ups = '',
+        mgmt_support_needed = '',
+        additional_info = '',
+        submit = false,
+      } = req.body;
+
+      const stats = await computeWeeklyStats(repId, weekOf);
+      const status = submit ? 'submitted' : 'draft';
+      const submittedAt = submit ? new Date().toISOString() : null;
+
+      const report = await queryOne(
+        `INSERT INTO weekly_reports (
+          rep_id, week_of, status, submitted_at,
+          stats_accounts_contacted, stats_new_accounts, stats_activities_logged,
+          stats_follow_ups_due, stats_weekly_sales, stats_dormant_accounts,
+          sales_opportunities, product_opportunities, competitive_opportunities,
+          equipment_opportunities, planned_follow_ups, mgmt_support_needed, additional_info,
+          updated_at
+        ) VALUES (
+          $1, $2, $3, $4,
+          $5, $6, $7, $8, $9, $10,
+          $11, $12, $13, $14, $15, $16, $17,
+          NOW()
+        )
+        ON CONFLICT (rep_id, week_of) DO UPDATE SET
+          status = EXCLUDED.status,
+          submitted_at = COALESCE(EXCLUDED.submitted_at, weekly_reports.submitted_at),
+          stats_accounts_contacted = EXCLUDED.stats_accounts_contacted,
+          stats_new_accounts = EXCLUDED.stats_new_accounts,
+          stats_activities_logged = EXCLUDED.stats_activities_logged,
+          stats_follow_ups_due = EXCLUDED.stats_follow_ups_due,
+          stats_weekly_sales = EXCLUDED.stats_weekly_sales,
+          stats_dormant_accounts = EXCLUDED.stats_dormant_accounts,
+          sales_opportunities = EXCLUDED.sales_opportunities,
+          product_opportunities = EXCLUDED.product_opportunities,
+          competitive_opportunities = EXCLUDED.competitive_opportunities,
+          equipment_opportunities = EXCLUDED.equipment_opportunities,
+          planned_follow_ups = EXCLUDED.planned_follow_ups,
+          mgmt_support_needed = EXCLUDED.mgmt_support_needed,
+          additional_info = EXCLUDED.additional_info,
+          updated_at = NOW()
+        RETURNING *`,
+        [repId, weekOf, status, submittedAt,
+         stats.stats_accounts_contacted, stats.stats_new_accounts,
+         stats.stats_activities_logged, stats.stats_follow_ups_due,
+         stats.stats_weekly_sales, stats.stats_dormant_accounts,
+         sales_opportunities, product_opportunities, competitive_opportunities,
+         equipment_opportunities, planned_follow_ups, mgmt_support_needed, additional_info]
+      );
+
+      res.json({ report });
+    } catch (err) {
+      console.error('Error saving weekly report:', err);
+      res.status(500).json({ error: 'Failed to save weekly report' });
+    }
+  });
+
+  // POST /api/weekly-report/submit
+  app.post('/api/weekly-report/submit', authenticate, async (req, res) => {
+    try {
+      const repId = req.user.userId;
+      const monday = getMonday(new Date());
+      const weekOf = formatWeekDate(monday);
+
+      // Save text fields first if provided
+      const {
+        sales_opportunities, product_opportunities, competitive_opportunities,
+        equipment_opportunities, planned_follow_ups, mgmt_support_needed, additional_info
+      } = req.body || {};
+
+      const stats = await computeWeeklyStats(repId, weekOf);
+
+      let report;
+      if (sales_opportunities !== undefined) {
+        report = await queryOne(
+          `UPDATE weekly_reports SET
+            status = 'submitted', submitted_at = NOW(),
+            stats_accounts_contacted = $1, stats_new_accounts = $2,
+            stats_activities_logged = $3, stats_follow_ups_due = $4,
+            stats_weekly_sales = $5, stats_dormant_accounts = $6,
+            sales_opportunities = $7, product_opportunities = $8,
+            competitive_opportunities = $9, equipment_opportunities = $10,
+            planned_follow_ups = $11, mgmt_support_needed = $12,
+            additional_info = $13, updated_at = NOW()
+           WHERE rep_id = $14 AND week_of = $15
+           RETURNING *`,
+          [stats.stats_accounts_contacted, stats.stats_new_accounts,
+           stats.stats_activities_logged, stats.stats_follow_ups_due,
+           stats.stats_weekly_sales, stats.stats_dormant_accounts,
+           sales_opportunities || '', product_opportunities || '',
+           competitive_opportunities || '', equipment_opportunities || '',
+           planned_follow_ups || '', mgmt_support_needed || '',
+           additional_info || '', repId, weekOf]
+        );
+      } else {
+        report = await queryOne(
+          `UPDATE weekly_reports SET
+            status = 'submitted', submitted_at = NOW(),
+            stats_accounts_contacted = $1, stats_new_accounts = $2,
+            stats_activities_logged = $3, stats_follow_ups_due = $4,
+            stats_weekly_sales = $5, stats_dormant_accounts = $6,
+            updated_at = NOW()
+           WHERE rep_id = $7 AND week_of = $8
+           RETURNING *`,
+          [stats.stats_accounts_contacted, stats.stats_new_accounts,
+           stats.stats_activities_logged, stats.stats_follow_ups_due,
+           stats.stats_weekly_sales, stats.stats_dormant_accounts,
+           repId, weekOf]
+        );
+      }
+
+      if (!report) {
+        return res.status(404).json({ error: 'No report found for this week. Please save a draft first.' });
+      }
+
+      const repName = `${req.user.firstName} ${req.user.lastName}`;
+
+      // Send email to management
+      if (resend) {
+        const weekOfFormatted = new Date(weekOf).toLocaleDateString('en-US', {
+          year: 'numeric', month: 'long', day: 'numeric',
+        });
+        await resend.emails.send({
+          from: EMAIL_FROM,
+          to: MGMT_EMAILS,
+          subject: `Weekly Report - ${repName} - Week of ${weekOfFormatted}`,
+          html: buildReportEmail(report, repName),
+        });
+      }
+
+      res.json({ report, emailed: !!resend });
+    } catch (err) {
+      console.error('Error submitting weekly report:', err);
+      res.status(500).json({ error: 'Failed to submit weekly report' });
+    }
+  });
+
+  // GET /api/weekly-report/history
+  app.get('/api/weekly-report/history', authenticate, async (req, res) => {
+    try {
+      let targetRepId = req.user.userId;
+      if (req.query.rep_id && (req.user.role === 'admin' || req.user.role === 'manager')) {
+        targetRepId = parseInt(req.query.rep_id, 10);
+      }
+      const reports = await queryAll(
+        `SELECT wr.*, u.first_name, u.last_name FROM weekly_reports wr JOIN users u ON u.id = wr.rep_id WHERE wr.rep_id = $1 ORDER BY wr.week_of DESC`,
+        [targetRepId]
+      );
+      res.json({ reports });
+    } catch (err) {
+      console.error('Error fetching report history:', err);
+      res.status(500).json({ error: 'Failed to load report history' });
+    }
+  });
+
+  // GET /api/weekly-report/admin/summary
+  app.get('/api/weekly-report/admin/summary', authenticate, async (req, res) => {
+    try {
+      if (req.user.role !== 'admin' && req.user.role !== 'manager') {
+        return res.status(403).json({ error: 'Access denied' });
+      }
+
+      let startDate, endDate;
+      if (req.query.month && /^\d{4}-\d{2}$/.test(req.query.month)) {
+        const [year, month] = req.query.month.split('-').map(Number);
+        startDate = new Date(year, month - 1, 1);
+        endDate = new Date(year, month, 0);
+      } else {
+        const now = new Date();
+        startDate = new Date(now.getFullYear(), now.getMonth(), 1);
+        endDate = new Date(now.getFullYear(), now.getMonth() + 1, 0);
+      }
+
+      const mondays = [];
+      const cursor = getMonday(startDate);
+      while (cursor <= endDate) {
+        mondays.push(formatWeekDate(new Date(cursor)));
+        cursor.setDate(cursor.getDate() + 7);
+      }
+
+      const reps = await queryAll(
+        `SELECT id, first_name, last_name FROM users WHERE role = 'rep' ORDER BY last_name, first_name`, []
+      );
+
+      const reports = await queryAll(
+        `SELECT rep_id, week_of, status, submitted_at FROM weekly_reports
+         WHERE week_of >= $1 AND week_of <= $2 ORDER BY week_of`,
+        [formatWeekDate(startDate), formatWeekDate(endDate)]
+      );
+
+      const reportMap = {};
+      for (const r of reports) {
+        const key = r.rep_id;
+        if (!reportMap[key]) reportMap[key] = {};
+        reportMap[key][formatWeekDate(new Date(r.week_of))] = {
+          week_of: formatWeekDate(new Date(r.week_of)),
+          status: r.status,
+          submitted_at: r.submitted_at,
+        };
+      }
+
+      const summary = reps.map((rep) => ({
+        rep_id: rep.id,
+        first_name: rep.first_name,
+        last_name: rep.last_name,
+        weeks: mondays.map((mon) => {
+          const entry = reportMap[rep.id] && reportMap[rep.id][mon];
+          return entry || { week_of: mon, status: 'missing', submitted_at: null };
+        }),
+      }));
+
+      res.json({ summary, mondays });
+    } catch (err) {
+      console.error('Error fetching admin summary:', err);
+      res.status(500).json({ error: 'Failed to load admin summary' });
+    }
+  });
+
+  // GET /api/weekly-report/:id
+  app.get('/api/weekly-report/:id', authenticate, async (req, res) => {
+    try {
+      const reportId = parseInt(req.params.id, 10);
+      if (isNaN(reportId)) return res.status(400).json({ error: 'Invalid report ID' });
+
+      const report = await queryOne(
+        `SELECT wr.*, u.first_name, u.last_name, u.email
+         FROM weekly_reports wr JOIN users u ON u.id = wr.rep_id
+         WHERE wr.id = $1`, [reportId]
+      );
+
+      if (!report) return res.status(404).json({ error: 'Report not found' });
+      if (req.user.role === 'rep' && report.rep_id !== req.user.userId) {
+        return res.status(403).json({ error: 'Access denied' });
+      }
+
+      res.json({ report });
+    } catch (err) {
+      console.error('Error fetching report by ID:', err);
+      res.status(500).json({ error: 'Failed to load report' });
+    }
+  });
+
+  // POST /api/weekly-report/monthly-summary
+  app.post('/api/weekly-report/monthly-summary', authenticate, async (req, res) => {
+    try {
+      if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin access required' });
+
+      const { month } = req.body;
+      if (!month || !/^\d{4}-\d{2}$/.test(month)) {
+        return res.status(400).json({ error: 'month is required in YYYY-MM format' });
+      }
+
+      const [year, mon] = month.split('-').map(Number);
+      const startDate = new Date(year, mon - 1, 1);
+      const endDate = new Date(year, mon, 0);
+      const monthLabel = startDate.toLocaleDateString('en-US', { year: 'numeric', month: 'long' });
+
+      const mondays = [];
+      const cursor = getMonday(startDate);
+      while (cursor <= endDate) {
+        mondays.push(formatWeekDate(new Date(cursor)));
+        cursor.setDate(cursor.getDate() + 7);
+      }
+      const totalWeeks = mondays.length;
+
+      const reps = await queryAll(
+        `SELECT id, first_name, last_name, email FROM users WHERE role = 'rep' ORDER BY last_name, first_name`, []
+      );
+
+      const reports = await queryAll(
+        `SELECT rep_id, week_of, status, submitted_at,
+                stats_accounts_contacted, stats_new_accounts, stats_activities_logged, stats_weekly_sales
+         FROM weekly_reports
+         WHERE week_of >= $1 AND week_of <= $2 AND status = 'submitted' ORDER BY week_of`,
+        [formatWeekDate(startDate), formatWeekDate(endDate)]
+      );
+
+      const reportsByRep = {};
+      for (const r of reports) {
+        if (!reportsByRep[r.rep_id]) reportsByRep[r.rep_id] = [];
+        reportsByRep[r.rep_id].push(r);
+      }
+
+      const repRows = reps.map((rep) => {
+        const repReports = reportsByRep[rep.id] || [];
+        const submitted = repReports.length;
+        const rate = totalWeeks > 0 ? Math.round((submitted / totalWeeks) * 100) : 0;
+        const totalSales = repReports.reduce((sum, r) => sum + (parseFloat(r.stats_weekly_sales) || 0), 0);
+        const totalActivities = repReports.reduce((sum, r) => sum + (parseInt(r.stats_activities_logged, 10) || 0), 0);
+        const totalContacted = repReports.reduce((sum, r) => sum + (parseInt(r.stats_accounts_contacted, 10) || 0), 0);
+        return { name: `${rep.first_name} ${rep.last_name}`, submitted, totalWeeks, rate, totalSales, totalActivities, totalContacted };
+      });
+
+      const html = `
+        <div style="font-family: Arial, Helvetica, sans-serif; max-width: 720px; margin: 0 auto; color: #1f2937;">
+          <div style="background-color: #1e3a8a; padding: 24px 32px; border-radius: 8px 8px 0 0;">
+            <h1 style="margin: 0; color: #ffffff; font-size: 22px;">Monthly Report Summary</h1>
+            <p style="margin: 6px 0 0 0; color: #bfdbfe; font-size: 14px;">${monthLabel} &mdash; ${totalWeeks} reporting weeks</p>
+          </div>
+          <div style="border: 1px solid #e5e7eb; border-top: none; border-radius: 0 0 8px 8px; padding: 28px 32px;">
+            <table style="width: 100%; border-collapse: collapse; font-size: 14px;">
+              <thead>
+                <tr style="background-color: #f9fafb;">
+                  <th style="text-align: left; padding: 10px 12px; border-bottom: 2px solid #1e3a8a; color: #1e3a8a;">Rep</th>
+                  <th style="text-align: center; padding: 10px 12px; border-bottom: 2px solid #1e3a8a; color: #1e3a8a;">Submitted</th>
+                  <th style="text-align: center; padding: 10px 12px; border-bottom: 2px solid #1e3a8a; color: #1e3a8a;">Completion</th>
+                  <th style="text-align: right; padding: 10px 12px; border-bottom: 2px solid #1e3a8a; color: #1e3a8a;">Total Sales</th>
+                  <th style="text-align: right; padding: 10px 12px; border-bottom: 2px solid #1e3a8a; color: #1e3a8a;">Activities</th>
+                  <th style="text-align: right; padding: 10px 12px; border-bottom: 2px solid #1e3a8a; color: #1e3a8a;">Accts Contacted</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${repRows.map((r) => {
+                  const rateColor = r.rate >= 80 ? '#16a34a' : r.rate >= 50 ? '#d97706' : '#ef4444';
+                  return `
+                    <tr>
+                      <td style="padding: 8px 12px; border-bottom: 1px solid #f3f4f6;">${r.name}</td>
+                      <td style="padding: 8px 12px; border-bottom: 1px solid #f3f4f6; text-align: center;">${r.submitted}/${r.totalWeeks}</td>
+                      <td style="padding: 8px 12px; border-bottom: 1px solid #f3f4f6; text-align: center; font-weight: 600; color: ${rateColor};">${r.rate}%</td>
+                      <td style="padding: 8px 12px; border-bottom: 1px solid #f3f4f6; text-align: right;">$${r.totalSales.toLocaleString('en-US', { minimumFractionDigits: 2 })}</td>
+                      <td style="padding: 8px 12px; border-bottom: 1px solid #f3f4f6; text-align: right;">${r.totalActivities}</td>
+                      <td style="padding: 8px 12px; border-bottom: 1px solid #f3f4f6; text-align: right;">${r.totalContacted}</td>
+                    </tr>
+                  `;
+                }).join('')}
+              </tbody>
+            </table>
+            <div style="margin-top: 24px; padding-top: 16px; border-top: 1px solid #e5e7eb; text-align: center;">
+              <p style="margin: 0; font-size: 12px; color: #9ca3af;">Generated ${new Date().toLocaleString('en-US')} &bull; CHC CRM</p>
+            </div>
+          </div>
+        </div>
+      `;
+
+      if (resend) {
+        await resend.emails.send({
+          from: EMAIL_FROM,
+          to: MGMT_EMAILS,
+          subject: `Monthly Report Summary - ${monthLabel}`,
+          html,
+        });
+      }
+
+      res.json({ message: 'Monthly summary email sent', repRows });
+    } catch (err) {
+      console.error('Error sending monthly summary:', err);
+      res.status(500).json({ error: 'Failed to send monthly summary' });
+    }
+  });
+
   // ─── HEALTH ───
   app.get('/api/health', async (req, res) => {
     try {

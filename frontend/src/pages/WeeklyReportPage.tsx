@@ -316,7 +316,7 @@ export default function WeeklyReportPage({ user }: { user: User }) {
             <StatCard label="Accounts Contacted" value={report.stats_accounts_contacted} icon={Users} color="bg-blue-50 text-blue-600" />
             <StatCard label="New Accounts" value={report.stats_new_accounts} icon={BarChart3} color="bg-emerald-50 text-emerald-600" />
             <StatCard label="Activities Logged" value={report.stats_activities_logged} icon={Activity} color="bg-purple-50 text-purple-600" />
-            <StatCard label="Follow-Ups Due" value={report.stats_follow_ups_due} icon={CalendarDays} color="bg-cyan-50 text-cyan-600" />
+            <StatCard label="Follow-Ups Next Week" value={report.stats_follow_ups_due} icon={CalendarDays} color="bg-cyan-50 text-cyan-600" />
             <StatCard label="Weekly Sales" value={`$${Number(report.stats_weekly_sales).toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`} icon={DollarSign} color="bg-amber-50 text-amber-600" />
             <StatCard label="Dormant (30+ days)" value={report.stats_dormant_accounts} icon={AlertTriangle} color="bg-red-50 text-red-600" />
           </div>
@@ -350,7 +350,7 @@ export default function WeeklyReportPage({ user }: { user: User }) {
               )}
               {highlights.upcoming_follow_ups.length > 0 && (
                 <div className="bg-white/80 backdrop-blur-sm rounded-2xl border border-navy-100 p-4 shadow-card">
-                  <h4 className="text-xs font-bold text-navy-500 uppercase tracking-wider mb-2">Upcoming Follow-Ups</h4>
+                  <h4 className="text-xs font-bold text-navy-500 uppercase tracking-wider mb-2">Follow-Ups Planned Next Week</h4>
                   <div className="space-y-1.5">
                     {highlights.upcoming_follow_ups.map((f, i) => (
                       <div key={i} className="flex items-center justify-between text-sm">

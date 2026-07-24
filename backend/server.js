@@ -2710,10 +2710,13 @@ async function startServer() {
          WHERE rep_id = $1 AND created_at >= $2 AND created_at < ($3::date + INTERVAL '1 day')`,
         [repId, mondayStr, sundayStr]
       ),
+      // Follow-ups due NEXT week (the week after the reporting week)
       queryOne(
         `SELECT COUNT(*) AS cnt FROM accounts
          WHERE assigned_rep_id = $1 AND deleted_at IS NULL
-           AND follow_up_date IS NOT NULL AND follow_up_date >= $2 AND follow_up_date <= $3`,
+           AND follow_up_date IS NOT NULL
+           AND follow_up_date >= ($2::date + INTERVAL '7 days')
+           AND follow_up_date < ($3::date + INTERVAL '8 days')`,
         [repId, mondayStr, sundayStr]
       ),
       queryOne(
@@ -2748,7 +2751,7 @@ async function startServer() {
       ['Accounts Contacted', report.stats_accounts_contacted],
       ['New Accounts', report.stats_new_accounts],
       ['Activities Logged', report.stats_activities_logged],
-      ['Follow-Ups Due', report.stats_follow_ups_due],
+      ['Follow-Ups Next Week', report.stats_follow_ups_due],
       ['Weekly Sales', `$${Number(report.stats_weekly_sales).toLocaleString('en-US', { minimumFractionDigits: 2 })}`],
       ['Dormant Accounts (30+ days)', report.stats_dormant_accounts],
     ];
@@ -2849,11 +2852,12 @@ async function startServer() {
         [repId, weekOf, sundayStr]
       );
 
-      // CRM highlights: upcoming follow-ups (next 7 days from accounts table)
-      const today = formatWeekDate(new Date());
-      const sevenDaysOut = new Date();
-      sevenDaysOut.setDate(sevenDaysOut.getDate() + 7);
-      const sevenDaysStr = formatWeekDate(sevenDaysOut);
+      // CRM highlights: follow-ups planned for NEXT week
+      const nextMonday = new Date(monday);
+      nextMonday.setDate(nextMonday.getDate() + 7);
+      const nextSunday = getSunday(nextMonday);
+      const nextMondayStr = formatWeekDate(nextMonday);
+      const nextSundayStr = formatWeekDate(nextSunday);
 
       const upcomingFollowUps = await queryAll(
         `SELECT a.shop_name, a.follow_up_date
@@ -2862,7 +2866,7 @@ async function startServer() {
            AND a.follow_up_date IS NOT NULL
            AND a.follow_up_date >= $2 AND a.follow_up_date <= $3
          ORDER BY a.follow_up_date ASC`,
-        [repId, today, sevenDaysStr]
+        [repId, nextMondayStr, nextSundayStr]
       );
 
       res.json({

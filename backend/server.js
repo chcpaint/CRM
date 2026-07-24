@@ -2694,6 +2694,13 @@ async function startServer() {
     const mondayStr = formatWeekDate(monday);
     const sundayStr = formatWeekDate(sunday);
 
+    // Next week boundaries (for follow-ups)
+    const nextMonday = new Date(monday);
+    nextMonday.setDate(nextMonday.getDate() + 7);
+    const nextSunday = getSunday(nextMonday);
+    const nextMondayStr = formatWeekDate(nextMonday);
+    const nextSundayStr = formatWeekDate(nextSunday);
+
     const [contacted, newAccts, activitiesLogged, followUpsDue, weeklySales, dormant] = await Promise.all([
       queryOne(
         `SELECT COUNT(DISTINCT account_id) AS cnt FROM activities
@@ -2710,14 +2717,13 @@ async function startServer() {
          WHERE rep_id = $1 AND created_at >= $2 AND created_at < ($3::date + INTERVAL '1 day')`,
         [repId, mondayStr, sundayStr]
       ),
-      // Follow-ups due NEXT week (the week after the reporting week)
+      // Follow-ups planned for NEXT week (text column — compare as strings)
       queryOne(
         `SELECT COUNT(*) AS cnt FROM accounts
          WHERE assigned_rep_id = $1 AND deleted_at IS NULL
            AND follow_up_date IS NOT NULL
-           AND follow_up_date >= ($2::date + INTERVAL '7 days')
-           AND follow_up_date < ($3::date + INTERVAL '8 days')`,
-        [repId, mondayStr, sundayStr]
+           AND follow_up_date >= $2 AND follow_up_date <= $3`,
+        [repId, nextMondayStr, nextSundayStr]
       ),
       queryOne(
         `SELECT COALESCE(SUM(sale_amount), 0) AS total FROM sales_data

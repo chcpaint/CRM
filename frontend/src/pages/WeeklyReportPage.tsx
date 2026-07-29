@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { api } from '../services/api';
 import { User } from '../types';
-import { Save, Send, CheckCircle, Clock, BarChart3, Users, Activity, CalendarDays, DollarSign, AlertTriangle, ChevronDown, ChevronUp, Eye } from 'lucide-react';
+import { Save, Send, CheckCircle, Clock, BarChart3, Users, Activity, CalendarDays, DollarSign, AlertTriangle, ChevronDown, ChevronUp, Eye, TrendingUp, TrendingDown, ShieldAlert, Target } from 'lucide-react';
 
 interface WeeklyReport {
   id: number;
@@ -33,6 +33,15 @@ interface CrmHighlights {
   upcoming_follow_ups: { shop_name: string; follow_up_date: string }[];
 }
 
+interface DataSummary {
+  sales_mtd: number;
+  sales_prior_month: number;
+  current_month_name: string;
+  prior_month_name: string;
+  off_cadence: { customer_name: string; prev_period: number; last_order: string }[];
+  pcr_gaps: { customer_name: string; total: number; missing: string[] }[];
+}
+
 interface AdminSummaryRep {
   rep_id: number;
   first_name: string;
@@ -56,6 +65,7 @@ export default function WeeklyReportPage({ user }: { user: User }) {
   // Rep survey state
   const [report, setReport] = useState<WeeklyReport | null>(null);
   const [highlights, setHighlights] = useState<CrmHighlights | null>(null);
+  const [dataSummary, setDataSummary] = useState<DataSummary | null>(null);
   const [formData, setFormData] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -86,6 +96,7 @@ export default function WeeklyReportPage({ user }: { user: User }) {
       const data = await api.get('/weekly-report/current');
       setReport(data.report);
       setHighlights(data.crm_highlights);
+      setDataSummary(data.data_summary || null);
       setFormData({
         sales_opportunities: data.report.sales_opportunities || '',
         product_opportunities: data.report.product_opportunities || '',
@@ -311,6 +322,77 @@ export default function WeeklyReportPage({ user }: { user: User }) {
       {/* Survey Form (reps + admin "My Report" tab) */}
       {(!isAdmin || adminTab === 'survey') && report && (
         <>
+          {/* Data Snapshot */}
+          {dataSummary && (
+            <div className="bg-gradient-to-r from-navy-50 to-blue-50 rounded-2xl border border-navy-100 p-4 sm:p-5 shadow-card">
+              <h3 className="text-xs font-bold text-navy-500 uppercase tracking-wider mb-3 flex items-center gap-1.5">
+                <Target className="w-3.5 h-3.5" /> Data Snapshot
+              </h3>
+              <div className="grid sm:grid-cols-3 gap-4">
+                {/* Sales MTD vs Prior */}
+                <div>
+                  <div className="text-xs font-semibold text-navy-500 mb-1.5">Sales Comparison</div>
+                  <div className="flex items-baseline gap-2">
+                    <span className="text-lg font-bold text-navy-900">${Number(dataSummary.sales_mtd).toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}</span>
+                    <span className="text-xs text-navy-400">{dataSummary.current_month_name} MTD</span>
+                  </div>
+                  <div className="flex items-baseline gap-2 mt-0.5">
+                    <span className="text-sm text-navy-600">${Number(dataSummary.sales_prior_month).toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}</span>
+                    <span className="text-xs text-navy-400">{dataSummary.prior_month_name} Total</span>
+                  </div>
+                  {dataSummary.sales_prior_month > 0 && (
+                    <div className={`flex items-center gap-1 mt-1 text-xs font-semibold ${dataSummary.sales_mtd >= dataSummary.sales_prior_month ? 'text-emerald-600' : 'text-red-500'}`}>
+                      {dataSummary.sales_mtd >= dataSummary.sales_prior_month ? <TrendingUp className="w-3 h-3" /> : <TrendingDown className="w-3 h-3" />}
+                      {dataSummary.sales_mtd >= dataSummary.sales_prior_month ? '+' : ''}{((dataSummary.sales_mtd - dataSummary.sales_prior_month) / dataSummary.sales_prior_month * 100).toFixed(0)}% vs {dataSummary.prior_month_name}
+                    </div>
+                  )}
+                </div>
+
+                {/* Off-Cadence */}
+                <div>
+                  <div className="text-xs font-semibold text-red-500 mb-1.5 flex items-center gap-1">
+                    <ShieldAlert className="w-3 h-3" /> Recently Off-Cadence
+                  </div>
+                  {dataSummary.off_cadence.length === 0 ? (
+                    <p className="text-xs text-navy-400">All active customers on track</p>
+                  ) : (
+                    <div className="space-y-1.5">
+                      {dataSummary.off_cadence.map((c, i) => (
+                        <div key={i}>
+                          <div className="text-sm font-medium text-navy-800 truncate">{c.customer_name}</div>
+                          <div className="text-xs text-navy-400">
+                            ${Number(c.prev_period).toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 })} prev 3mo · last {c.last_order}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                {/* PCR Category Gaps */}
+                <div>
+                  <div className="text-xs font-semibold text-navy-500 mb-1.5">Category Gaps — Top Shops</div>
+                  {dataSummary.pcr_gaps.length === 0 ? (
+                    <p className="text-xs text-navy-400">No gaps detected</p>
+                  ) : (
+                    <div className="space-y-1.5">
+                      {dataSummary.pcr_gaps.slice(0, 3).map((s, i) => (
+                        <div key={i}>
+                          <div className="text-sm font-medium text-navy-800 truncate">
+                            {s.customer_name} <span className="text-xs text-navy-400">(${Number(s.total).toLocaleString('en-US', { maximumFractionDigits: 0 })})</span>
+                          </div>
+                          <div className="text-xs text-red-500 truncate">
+                            Not buying: {s.missing.slice(0, 3).join(', ')}{s.missing.length > 3 ? ` +${s.missing.length - 3}` : ''}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
+
           {/* CRM Stats Cards */}
           <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
             <StatCard label="Accounts Contacted" value={report.stats_accounts_contacted} icon={Users} color="bg-blue-50 text-blue-600" />

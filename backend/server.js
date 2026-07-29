@@ -2748,7 +2748,105 @@ async function startServer() {
     };
   }
 
-  function buildReportEmail(report, repName) {
+  // Compute data-driven summary for weekly report (auto-populated, no rep input needed)
+  async function computeDataSummary(repId) {
+    const now = new Date();
+    const year = now.getFullYear();
+    const month = String(now.getMonth() + 1).padStart(2, '0');
+    const day = String(now.getDate()).padStart(2, '0');
+    const currentMonthStart = `${year}-${month}-01`;
+    const currentDate = `${year}-${month}-${day}`;
+
+    // Prior month boundaries
+    const priorDate = new Date(year, now.getMonth() - 1, 1);
+    const priorYear = priorDate.getFullYear();
+    const priorMonth = String(priorDate.getMonth() + 1).padStart(2, '0');
+    const priorMonthStart = `${priorYear}-${priorMonth}-01`;
+    const priorMonthEnd = new Date(priorYear, priorDate.getMonth() + 1, 0);
+    const priorMonthEndStr = `${priorYear}-${priorMonth}-${String(priorMonthEnd.getDate()).padStart(2, '0')}`;
+
+    // 3-month lookback for off-cadence detection (skip ancient dormant shops)
+    const threeMonthsAgo = new Date(year, now.getMonth() - 3, 1);
+    const threeMonthsAgoStr = `${threeMonthsAgo.getFullYear()}-${String(threeMonthsAgo.getMonth() + 1).padStart(2, '0')}-01`;
+
+    const [salesComparison, offCadence, pcrGaps] = await Promise.all([
+      // 1. Sales MTD vs prior full month
+      queryOne(
+        `SELECT
+           SUM(CASE WHEN sale_date >= $2 AND sale_date <= $3 THEN sale_amount ELSE 0 END) AS mtd,
+           SUM(CASE WHEN sale_date >= $4 AND sale_date <= $5 THEN sale_amount ELSE 0 END) AS prior_month
+         FROM sales_data WHERE rep_id = $1`,
+        [repId, currentMonthStart, currentDate, priorMonthStart, priorMonthEndStr]
+      ),
+
+      // 2. Top 2 recently off-cadence customers (bought in prior 3 months but not current month)
+      queryAll(
+        `WITH recent_buyers AS (
+           SELECT customer_name,
+             SUM(CASE WHEN sale_date >= $2 AND sale_date < $3 THEN sale_amount ELSE 0 END) AS prev_period,
+             SUM(CASE WHEN sale_date >= $3 THEN sale_amount ELSE 0 END) AS current_mo,
+             MAX(sale_date) AS last_order
+           FROM sales_data WHERE rep_id = $1
+           GROUP BY customer_name
+         )
+         SELECT customer_name, prev_period, current_mo, last_order
+         FROM recent_buyers
+         WHERE prev_period > 0 AND current_mo = 0 AND last_order >= $2
+         ORDER BY prev_period DESC LIMIT 2`,
+        [repId, threeMonthsAgoStr, currentMonthStart]
+      ),
+
+      // 3. Top 5 shops by YTD revenue with missing product categories
+      queryAll(
+        `WITH top_shops AS (
+           SELECT customer_name, SUM(sale_amount) AS total
+           FROM sales_data WHERE rep_id = $1 AND sale_date >= $2
+           GROUP BY customer_name ORDER BY total DESC LIMIT 5
+         ),
+         shop_cats AS (
+           SELECT s.customer_name, ARRAY_AGG(DISTINCT s.category) AS bought
+           FROM sales_data s
+           JOIN top_shops t ON s.customer_name = t.customer_name
+           WHERE s.sale_date >= $2 AND s.category IS NOT NULL AND s.category != ''
+           GROUP BY s.customer_name
+         ),
+         all_cats AS (
+           SELECT DISTINCT category FROM sales_data
+           WHERE category IS NOT NULL AND category != ''
+             AND category NOT IN ('Misc', 'Clips', 'PPS/Cans')
+         )
+         SELECT t.customer_name, t.total,
+           (SELECT ARRAY_AGG(category) FROM all_cats WHERE category != ALL(sc.bought)) AS missing
+         FROM top_shops t
+         JOIN shop_cats sc ON t.customer_name = sc.customer_name
+         ORDER BY t.total DESC`,
+        [repId, `${year}-01-01`]
+      ),
+    ]);
+
+    const monthNames = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    const currentMonthName = monthNames[now.getMonth()];
+    const priorMonthName = monthNames[priorDate.getMonth()];
+
+    return {
+      sales_mtd: parseFloat(salesComparison.mtd) || 0,
+      sales_prior_month: parseFloat(salesComparison.prior_month) || 0,
+      current_month_name: currentMonthName,
+      prior_month_name: priorMonthName,
+      off_cadence: offCadence.map(r => ({
+        customer_name: r.customer_name,
+        prev_period: parseFloat(r.prev_period) || 0,
+        last_order: r.last_order,
+      })),
+      pcr_gaps: pcrGaps.filter(r => r.missing && r.missing.length > 0).map(r => ({
+        customer_name: r.customer_name,
+        total: parseFloat(r.total) || 0,
+        missing: r.missing,
+      })),
+    };
+  }
+
+  function buildReportEmail(report, repName, dataSummary) {
     const weekOfFormatted = new Date(report.week_of).toLocaleDateString('en-US', {
       year: 'numeric', month: 'long', day: 'numeric',
     });
@@ -2772,6 +2870,68 @@ async function startServer() {
       ['Additional Info', report.additional_info],
     ];
 
+    // Build data summary section for email
+    let dataSummaryHtml = '';
+    if (dataSummary) {
+      const mtd = Number(dataSummary.sales_mtd).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+      const prior = Number(dataSummary.sales_prior_month).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+      const diff = dataSummary.sales_mtd - dataSummary.sales_prior_month;
+      const diffPct = dataSummary.sales_prior_month > 0 ? ((diff / dataSummary.sales_prior_month) * 100).toFixed(0) : 'N/A';
+      const diffColor = diff >= 0 ? '#16a34a' : '#ef4444';
+      const diffSign = diff >= 0 ? '+' : '';
+
+      const offCadenceRows = (dataSummary.off_cadence || []).map(c => {
+        const lost = Number(c.prev_period).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+        return `<tr><td style="padding:4px 8px;font-size:13px;border-bottom:1px solid #f3f4f6;">${c.customer_name}</td><td style="padding:4px 8px;font-size:13px;border-bottom:1px solid #f3f4f6;text-align:right;color:#ef4444;">$${lost}</td><td style="padding:4px 8px;font-size:13px;border-bottom:1px solid #f3f4f6;text-align:right;color:#6b7280;">${c.last_order}</td></tr>`;
+      }).join('');
+
+      const pcrRows = (dataSummary.pcr_gaps || []).slice(0, 3).map(s => {
+        const rev = Number(s.total).toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 });
+        const missing = (s.missing || []).slice(0, 4).join(', ') + (s.missing.length > 4 ? ` +${s.missing.length - 4}` : '');
+        return `<tr><td style="padding:4px 8px;font-size:13px;border-bottom:1px solid #f3f4f6;">${s.customer_name}</td><td style="padding:4px 8px;font-size:13px;border-bottom:1px solid #f3f4f6;text-align:right;">$${rev}</td><td style="padding:4px 8px;font-size:13px;border-bottom:1px solid #f3f4f6;color:#ef4444;">${missing}</td></tr>`;
+      }).join('');
+
+      dataSummaryHtml = `
+        <div style="background:#f0f4ff;border-radius:6px;padding:16px 20px;margin-bottom:24px;border-left:4px solid #1e3a8a;">
+          <h2 style="font-size:15px;color:#1e3a8a;margin:0 0 12px 0;">Data Snapshot</h2>
+          <table style="width:100%;border-collapse:collapse;margin-bottom:12px;">
+            <tr>
+              <td style="font-size:13px;color:#374151;padding:2px 0;">${dataSummary.current_month_name} MTD</td>
+              <td style="font-size:13px;font-weight:600;text-align:right;padding:2px 0;">$${mtd}</td>
+            </tr>
+            <tr>
+              <td style="font-size:13px;color:#374151;padding:2px 0;">${dataSummary.prior_month_name} Total</td>
+              <td style="font-size:13px;text-align:right;padding:2px 0;">$${prior}</td>
+            </tr>
+            <tr>
+              <td style="font-size:13px;color:#374151;padding:2px 0;">Variance</td>
+              <td style="font-size:13px;font-weight:600;text-align:right;padding:2px 0;color:${diffColor};">${diffSign}$${Math.abs(diff).toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2})} (${diffSign}${diffPct}%)</td>
+            </tr>
+          </table>
+          ${offCadenceRows ? `
+          <div style="font-size:12px;font-weight:600;color:#ef4444;text-transform:uppercase;letter-spacing:0.5px;margin:10px 0 4px 0;">Recently Off-Cadence</div>
+          <table style="width:100%;border-collapse:collapse;margin-bottom:12px;">
+            <tr style="background:#e5e7eb;">
+              <th style="padding:4px 8px;font-size:11px;text-align:left;text-transform:uppercase;color:#6b7280;">Shop</th>
+              <th style="padding:4px 8px;font-size:11px;text-align:right;text-transform:uppercase;color:#6b7280;">Prev 3mo</th>
+              <th style="padding:4px 8px;font-size:11px;text-align:right;text-transform:uppercase;color:#6b7280;">Last Order</th>
+            </tr>
+            ${offCadenceRows}
+          </table>` : ''}
+          ${pcrRows ? `
+          <div style="font-size:12px;font-weight:600;color:#1e3a8a;text-transform:uppercase;letter-spacing:0.5px;margin:10px 0 4px 0;">Category Gaps — Top Shops</div>
+          <table style="width:100%;border-collapse:collapse;">
+            <tr style="background:#e5e7eb;">
+              <th style="padding:4px 8px;font-size:11px;text-align:left;text-transform:uppercase;color:#6b7280;">Shop</th>
+              <th style="padding:4px 8px;font-size:11px;text-align:right;text-transform:uppercase;color:#6b7280;">YTD Rev</th>
+              <th style="padding:4px 8px;font-size:11px;text-align:left;text-transform:uppercase;color:#6b7280;">Not Buying</th>
+            </tr>
+            ${pcrRows}
+          </table>` : ''}
+        </div>
+      `;
+    }
+
     return `
       <div style="font-family: Arial, Helvetica, sans-serif; max-width: 680px; margin: 0 auto; color: #1f2937;">
         <div style="background-color: #1e3a8a; padding: 24px 32px; border-radius: 8px 8px 0 0;">
@@ -2779,6 +2939,7 @@ async function startServer() {
           <p style="margin: 6px 0 0 0; color: #bfdbfe; font-size: 14px;">${repName} &mdash; Week of ${weekOfFormatted}</p>
         </div>
         <div style="border: 1px solid #e5e7eb; border-top: none; border-radius: 0 0 8px 8px; padding: 28px 32px;">
+          ${dataSummaryHtml}
           <h2 style="font-size: 16px; color: #1e3a8a; border-bottom: 2px solid #1e3a8a; padding-bottom: 6px; margin-top: 0;">CRM Activity Stats</h2>
           <table style="width: 100%; border-collapse: collapse; margin-bottom: 28px;">
             ${statRows.map(([label, val]) => `
@@ -2875,12 +3036,16 @@ async function startServer() {
         [repId, nextMondayStr, nextSundayStr]
       );
 
+      // Data-driven summary (auto-populated)
+      const dataSummary = await computeDataSummary(repId);
+
       res.json({
         report,
         crm_highlights: {
           accounts_touched: accountsTouched,
           upcoming_follow_ups: upcomingFollowUps,
         },
+        data_summary: dataSummary,
       });
     } catch (err) {
       console.error('Error fetching current weekly report:', err);
@@ -3017,6 +3182,9 @@ async function startServer() {
 
       const repName = `${req.user.firstName} ${req.user.lastName}`;
 
+      // Compute data summary for email
+      const dataSummary = await computeDataSummary(repId);
+
       // Send email to management
       if (resend) {
         const weekOfFormatted = new Date(weekOf).toLocaleDateString('en-US', {
@@ -3026,7 +3194,7 @@ async function startServer() {
           from: EMAIL_FROM,
           to: MGMT_EMAILS,
           subject: `Weekly Report - ${repName} - Week of ${weekOfFormatted}`,
-          html: buildReportEmail(report, repName),
+          html: buildReportEmail(report, repName, dataSummary),
         });
       }
 

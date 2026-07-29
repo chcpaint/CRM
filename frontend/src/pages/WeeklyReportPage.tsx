@@ -54,7 +54,7 @@ const SURVEY_SECTIONS = [
   { key: 'product_opportunities', label: 'Product Opportunities', placeholder: 'Any product requests, gaps, or cross-sell/upsell opportunities?', icon: BarChart3, color: 'text-blue-600' },
   { key: 'competitive_opportunities', label: 'Competitive Opportunities', placeholder: 'Any competitive intel? Competitor pricing, wins/losses, market shifts?', icon: Activity, color: 'text-purple-600' },
   { key: 'equipment_opportunities', label: 'Equipment Opportunities', placeholder: 'Any equipment needs, upgrades, or demo requests from customers?', icon: Users, color: 'text-orange-600' },
-  { key: 'planned_follow_ups', label: 'Planned Follow-Ups for Next Week', placeholder: 'Which accounts are you planning to follow up with next week? Any scheduled meetings or calls?', icon: CalendarDays, color: 'text-cyan-600' },
+  { key: 'planned_follow_ups', label: 'Planned Follow-Ups for Next Week', placeholder: 'Auto-populated from your CRM follow-ups, reminders, and scheduled activities. Edit or add more details.', icon: CalendarDays, color: 'text-cyan-600' },
   { key: 'mgmt_support_needed', label: 'Management Support Needed', placeholder: 'Do you need any help from management? Pricing approvals, escalations, customer issues?', icon: AlertTriangle, color: 'text-red-600' },
   { key: 'additional_info', label: 'Additional Info', placeholder: 'Anything else you\'d like to share about your week?', icon: Save, color: 'text-navy-600' },
 ] as const;
@@ -97,12 +97,18 @@ export default function WeeklyReportPage({ user }: { user: User }) {
       setReport(data.report);
       setHighlights(data.crm_highlights);
       setDataSummary(data.data_summary || null);
+      // Auto-fill planned_follow_ups from CRM data if the rep hasn't written anything yet
+      const savedFollowUps = data.report.planned_follow_ups || '';
+      const followUpText = savedFollowUps.trim()
+        ? savedFollowUps
+        : (data.follow_up_suggestion || '');
+
       setFormData({
         sales_opportunities: data.report.sales_opportunities || '',
         product_opportunities: data.report.product_opportunities || '',
         competitive_opportunities: data.report.competitive_opportunities || '',
         equipment_opportunities: data.report.equipment_opportunities || '',
-        planned_follow_ups: data.report.planned_follow_ups || '',
+        planned_follow_ups: followUpText,
         mgmt_support_needed: data.report.mgmt_support_needed || '',
         additional_info: data.report.additional_info || '',
       });

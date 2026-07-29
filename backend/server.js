@@ -3055,6 +3055,57 @@ async function startServer() {
       // Data-driven summary (auto-populated)
       const dataSummary = await computeDataSummary(repId);
 
+      // Auto-populate follow-up suggestions from CRM data
+      // Pull from: account follow-up dates, QuickNotes reminders, scheduled activities
+      const followUpSuggestionLines = [];
+
+      // 1. Account follow-up dates for this/next week
+      if (upcomingFollowUps.length > 0) {
+        for (const f of upcomingFollowUps) {
+          const d = new Date(f.follow_up_date + 'T00:00:00');
+          const dayName = d.toLocaleDateString('en-US', { weekday: 'short' });
+          const dateStr = d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+          followUpSuggestionLines.push(`• ${f.shop_name} — follow-up ${dayName} ${dateStr}`);
+        }
+      }
+
+      // 2. QuickNotes reminders for coming week
+      const noteReminders = await queryAll(
+        `SELECT content, reminder_at FROM user_notes
+         WHERE user_id = $1 AND completed_at IS NULL
+           AND reminder_at IS NOT NULL
+           AND reminder_at >= $2::date AND reminder_at < ($3::date + INTERVAL '1 day')
+         ORDER BY reminder_at ASC`,
+        [repId, nextMondayStr, nextSundayStr]
+      );
+      for (const n of noteReminders) {
+        const d = new Date(n.reminder_at);
+        const dayName = d.toLocaleDateString('en-US', { weekday: 'short', timeZone: 'America/New_York' });
+        const snippet = (n.content || '').substring(0, 80).replace(/\n/g, ' ');
+        followUpSuggestionLines.push(`• Reminder (${dayName}): ${snippet}`);
+      }
+
+      // 3. Scheduled activities not yet completed
+      const scheduledActivities = await queryAll(
+        `SELECT act.activity_type, act.description, act.scheduled_date, a.shop_name
+         FROM activities act
+         JOIN accounts a ON a.id = act.account_id
+         WHERE act.rep_id = $1 AND act.completed_date IS NULL
+           AND act.scheduled_date >= $2::date AND act.scheduled_date < ($3::date + INTERVAL '1 day')
+         ORDER BY act.scheduled_date ASC`,
+        [repId, nextMondayStr, nextSundayStr]
+      );
+      for (const sa of scheduledActivities) {
+        const d = new Date(sa.scheduled_date);
+        const dayName = d.toLocaleDateString('en-US', { weekday: 'short', timeZone: 'America/New_York' });
+        const desc = (sa.description || sa.activity_type || '').substring(0, 60);
+        followUpSuggestionLines.push(`• ${sa.shop_name} — ${desc} (${dayName})`);
+      }
+
+      const followUpSuggestion = followUpSuggestionLines.length > 0
+        ? followUpSuggestionLines.join('\n')
+        : '';
+
       res.json({
         report,
         crm_highlights: {
@@ -3062,6 +3113,7 @@ async function startServer() {
           upcoming_follow_ups: upcomingFollowUps,
         },
         data_summary: dataSummary,
+        follow_up_suggestion: followUpSuggestion,
       });
     } catch (err) {
       console.error('Error fetching current weekly report:', err);

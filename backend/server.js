@@ -2666,14 +2666,30 @@ async function startServer() {
 
   // ─── WEEKLY REPORTS ───
 
-  // Helper: get Monday of the current week (or any given date)
+  // Helper: get Monday of the current report week.
+  // Report week locks Saturday at 5 PM Eastern — after that, rolls to next Monday.
   function getMonday(d) {
-    const date = new Date(d || new Date());
-    const day = date.getDay();
-    const diff = date.getDate() - day + (day === 0 ? -6 : 1);
-    const monday = new Date(date);
+    // Work in Eastern Time (ET)
+    const nowUTC = d ? new Date(d) : new Date();
+    // Eastern offset: UTC-5 (EST) or UTC-4 (EDT). Use Intl to get real offset.
+    const etStr = nowUTC.toLocaleString('en-US', { timeZone: 'America/New_York' });
+    const et = new Date(etStr);
+    const day = et.getDay(); // 0=Sun … 6=Sat
+    const hour = et.getHours();
+
+    // If Saturday >= 5PM or Sunday: roll forward to NEXT Monday
+    const pastCutover = (day === 6 && hour >= 17) || day === 0;
+
+    // Find this week's Monday first
+    const diff = et.getDate() - day + (day === 0 ? -6 : 1);
+    const monday = new Date(et);
     monday.setDate(diff);
     monday.setHours(0, 0, 0, 0);
+
+    if (pastCutover) {
+      // Advance to next Monday
+      monday.setDate(monday.getDate() + 7);
+    }
     return monday;
   }
 

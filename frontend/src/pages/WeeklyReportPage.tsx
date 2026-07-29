@@ -188,10 +188,12 @@ export default function WeeklyReportPage({ user }: { user: User }) {
   const weekOfDisplay = report ? new Date(report.week_of + 'T00:00:00').toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' }) : '';
   const isSubmitted = report?.status === 'submitted';
 
-  const today = new Date();
-  const dayOfWeek = today.getDay(); // 0=Sun, 5=Fri
+  // Use Eastern Time for cutover logic (Saturday 5 PM ET = locked)
+  const etNow = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' }));
+  const dayOfWeek = etNow.getDay(); // 0=Sun, 5=Fri, 6=Sat
+  const etHour = etNow.getHours();
   const isFriday = dayOfWeek === 5;
-  const isPastDue = dayOfWeek === 6 || dayOfWeek === 0; // Sat/Sun
+  const isPastDue = (dayOfWeek === 6 && etHour < 17); // Sat before 5PM — still this week, past due
 
   if (loading) {
     return (

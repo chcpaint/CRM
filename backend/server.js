@@ -3486,6 +3486,140 @@ async function startServer() {
     }
   });
 
+  // GET /api/weekly-report/team-current — admin/manager live view of all reps' current week
+  app.get('/api/weekly-report/team-current', authenticate, async (req, res) => {
+    try {
+      if (req.user.role !== 'admin' && req.user.role !== 'manager') {
+        return res.status(403).json({ error: 'Access denied' });
+      }
+      const monday = getMonday(new Date());
+      const weekOf = formatWeekDate(monday);
+
+      // Get all reps' reports for this week, with user info
+      const reports = await queryAll(
+        `SELECT wr.*, u.first_name, u.last_name
+         FROM weekly_reports wr
+         JOIN users u ON u.id = wr.rep_id
+         WHERE wr.week_of = $1
+         ORDER BY u.first_name, u.last_name`,
+        [weekOf]
+      );
+
+      // For each report, get comment count and latest data summary
+      const enriched = [];
+      for (const r of reports) {
+        const commentCount = await queryOne(
+          `SELECT COUNT(*) AS cnt FROM weekly_report_comments WHERE report_id = $1`,
+          [r.id]
+        );
+        // Compute live stats for this rep
+        const stats = await computeWeeklyStats(r.rep_id, weekOf);
+        const dataSummary = await computeDataSummary(r.rep_id);
+
+        enriched.push({
+          ...r,
+          ...stats,
+          comment_count: parseInt(commentCount.cnt, 10) || 0,
+          data_summary: dataSummary,
+        });
+      }
+
+      res.json({ reports: enriched, week_of: weekOf });
+    } catch (err) {
+      console.error('Error fetching team current reports:', err);
+      res.status(500).json({ error: 'Failed to load team reports' });
+    }
+  });
+
+  // GET /api/weekly-report/:id/comments — list comments on a report
+  app.get('/api/weekly-report/:id/comments', authenticate, async (req, res) => {
+    try {
+      const reportId = parseInt(req.params.id, 10);
+      const comments = await queryAll(
+        `SELECT wrc.*, u.first_name, u.last_name
+         FROM weekly_report_comments wrc
+         JOIN users u ON u.id = wrc.author_id
+         WHERE wrc.report_id = $1
+         ORDER BY wrc.created_at ASC`,
+        [reportId]
+      );
+      res.json({ comments });
+    } catch (err) {
+      console.error('Error fetching comments:', err);
+      res.status(500).json({ error: 'Failed to load comments' });
+    }
+  });
+
+  // POST /api/weekly-report/:id/comments — add a comment (admin/manager only)
+  app.post('/api/weekly-report/:id/comments', authenticate, async (req, res) => {
+    try {
+      if (req.user.role !== 'admin' && req.user.role !== 'manager') {
+        return res.status(403).json({ error: 'Access denied' });
+      }
+      const reportId = parseInt(req.params.id, 10);
+      const { content } = req.body;
+      if (!content || !content.trim()) {
+        return res.status(400).json({ error: 'Comment content is required' });
+      }
+      const comment = await queryOne(
+        `INSERT INTO weekly_report_comments (report_id, author_id, content)
+         VALUES ($1, $2, $3) RETURNING *`,
+        [reportId, req.user.userId, content.trim()]
+      );
+      // Get author info
+      const author = await queryOne(`SELECT first_name, last_name FROM users WHERE id = $1`, [req.user.userId]);
+      res.json({ comment: { ...comment, first_name: author.first_name, last_name: author.last_name } });
+    } catch (err) {
+      console.error('Error adding comment:', err);
+      res.status(500).json({ error: 'Failed to add comment' });
+    }
+  });
+
+  // POST /api/weekly-report/populate-all — admin trigger to populate stats for all reps
+  app.post('/api/weekly-report/populate-all', authenticate, async (req, res) => {
+    try {
+      if (req.user.role !== 'admin' && req.user.role !== 'manager') {
+        return res.status(403).json({ error: 'Access denied' });
+      }
+      const monday = getMonday(new Date());
+      const weekOf = formatWeekDate(monday);
+
+      // Get all users
+      const users = await queryAll(
+        `SELECT id FROM users WHERE role IN ('rep','admin','manager') ORDER BY id`, []
+      );
+
+      let populated = 0;
+      for (const u of users) {
+        const stats = await computeWeeklyStats(u.id, weekOf);
+        await queryOne(
+          `INSERT INTO weekly_reports (rep_id, week_of, status,
+            stats_accounts_contacted, stats_new_accounts, stats_activities_logged,
+            stats_follow_ups_due, stats_weekly_sales, stats_dormant_accounts)
+           VALUES ($1, $2, 'draft', $3, $4, $5, $6, $7, $8)
+           ON CONFLICT (rep_id, week_of) DO UPDATE SET
+            stats_accounts_contacted = EXCLUDED.stats_accounts_contacted,
+            stats_new_accounts = EXCLUDED.stats_new_accounts,
+            stats_activities_logged = EXCLUDED.stats_activities_logged,
+            stats_follow_ups_due = EXCLUDED.stats_follow_ups_due,
+            stats_weekly_sales = EXCLUDED.stats_weekly_sales,
+            stats_dormant_accounts = EXCLUDED.stats_dormant_accounts,
+            updated_at = NOW()
+           RETURNING id`,
+          [u.id, weekOf, stats.stats_accounts_contacted, stats.stats_new_accounts,
+           stats.stats_activities_logged, stats.stats_follow_ups_due,
+           stats.stats_weekly_sales, stats.stats_dormant_accounts]
+        );
+        populated++;
+      }
+
+      res.json({ message: `Populated ${populated} reports for week of ${weekOf}` });
+    } catch (err) {
+      console.error('Error populating reports:', err);
+      res.status(500).json({ error: 'Failed to populate reports' });
+    }
+  });
+
   // ─── HEALTH ───
   app.get('/api/health', async (req, res) => {
     try {

@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { api } from '../services/api';
 import { User } from '../types';
-import { Save, Send, CheckCircle, Clock, BarChart3, Users, Activity, CalendarDays, DollarSign, AlertTriangle, ChevronDown, ChevronUp, Eye, TrendingUp, TrendingDown, ShieldAlert, Target } from 'lucide-react';
+import { Save, Send, CheckCircle, Clock, BarChart3, Users, Activity, CalendarDays, DollarSign, AlertTriangle, ChevronDown, ChevronUp, Eye, TrendingUp, TrendingDown, ShieldAlert, Target, MessageSquare, RefreshCw } from 'lucide-react';
 
 interface WeeklyReport {
   id: number;
@@ -42,6 +42,21 @@ interface DataSummary {
   pcr_gaps: { customer_name: string; total: number; missing: string[] }[];
 }
 
+interface ReportComment {
+  id: number;
+  report_id: number;
+  author_id: number;
+  content: string;
+  created_at: string;
+  first_name: string;
+  last_name: string;
+}
+
+interface TeamReport extends WeeklyReport {
+  comment_count: number;
+  data_summary: DataSummary;
+}
+
 interface AdminSummaryRep {
   rep_id: number;
   first_name: string;
@@ -79,7 +94,7 @@ export default function WeeklyReportPage({ user }: { user: User }) {
   const [viewingReport, setViewingReport] = useState<WeeklyReport | null>(null);
 
   // Admin state
-  const [adminTab, setAdminTab] = useState<'survey' | 'tracker'>('survey');
+  const [adminTab, setAdminTab] = useState<'survey' | 'tracker' | 'team'>('survey');
   const [adminSummary, setAdminSummary] = useState<AdminSummaryRep[]>([]);
   const [adminMondays, setAdminMondays] = useState<string[]>([]);
   const [adminMonth, setAdminMonth] = useState('');
@@ -244,10 +259,16 @@ export default function WeeklyReportPage({ user }: { user: User }) {
                 My Report
               </button>
               <button
+                onClick={() => setAdminTab('team')}
+                className={`px-3 py-1.5 text-sm font-medium rounded-lg transition-colors ${adminTab === 'team' ? 'bg-white text-navy-900 shadow-sm' : 'text-navy-500'}`}
+              >
+                Team Reports
+              </button>
+              <button
                 onClick={() => setAdminTab('tracker')}
                 className={`px-3 py-1.5 text-sm font-medium rounded-lg transition-colors ${adminTab === 'tracker' ? 'bg-white text-navy-900 shadow-sm' : 'text-navy-500'}`}
               >
-                Team Tracker
+                History
               </button>
             </div>
           )}
@@ -307,6 +328,11 @@ export default function WeeklyReportPage({ user }: { user: User }) {
             <ReportReadonly report={viewingReport} />
           </div>
         </div>
+      )}
+
+      {/* Team Reports — live view */}
+      {isAdmin && adminTab === 'team' && (
+        <TeamReports user={user} />
       )}
 
       {/* Admin Tracker */}
@@ -558,6 +584,282 @@ function ReportReadonly({ report }: { report: WeeklyReport }) {
           <p className="text-sm text-navy-700 whitespace-pre-wrap">{(report as any)[s.key] || <span className="text-navy-300 italic">No response</span>}</p>
         </div>
       ))}
+    </div>
+  );
+}
+
+// ── Team Reports (live view with comments) ──
+function TeamReports({ user }: { user: User }) {
+  const [reports, setReports] = useState<TeamReport[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [expandedId, setExpandedId] = useState<number | null>(null);
+  const [comments, setComments] = useState<Record<number, ReportComment[]>>({});
+  const [commentText, setCommentText] = useState<Record<number, string>>({});
+  const [sendingComment, setSendingComment] = useState<number | null>(null);
+  const [weekOf, setWeekOf] = useState('');
+  const [populating, setPopulating] = useState(false);
+
+  const loadTeamReports = useCallback(async () => {
+    try {
+      setLoading(true);
+      const data = await api.get('/weekly-report/team-current');
+      setReports(data.reports || []);
+      setWeekOf(data.week_of || '');
+    } catch (err) { console.error(err); }
+    finally { setLoading(false); }
+  }, []);
+
+  useEffect(() => { loadTeamReports(); }, [loadTeamReports]);
+
+  const loadComments = async (reportId: number) => {
+    try {
+      const data = await api.get(`/weekly-report/${reportId}/comments`);
+      setComments(prev => ({ ...prev, [reportId]: data.comments || [] }));
+    } catch (err) { console.error(err); }
+  };
+
+  const toggleExpand = (reportId: number) => {
+    if (expandedId === reportId) {
+      setExpandedId(null);
+    } else {
+      setExpandedId(reportId);
+      if (!comments[reportId]) loadComments(reportId);
+    }
+  };
+
+  const addComment = async (reportId: number) => {
+    const text = (commentText[reportId] || '').trim();
+    if (!text) return;
+    setSendingComment(reportId);
+    try {
+      const data = await api.post(`/weekly-report/${reportId}/comments`, { content: text });
+      setComments(prev => ({
+        ...prev,
+        [reportId]: [...(prev[reportId] || []), data.comment],
+      }));
+      setCommentText(prev => ({ ...prev, [reportId]: '' }));
+      // Update comment count
+      setReports(prev => prev.map(r => r.id === reportId ? { ...r, comment_count: r.comment_count + 1 } : r));
+    } catch (err) { console.error(err); }
+    finally { setSendingComment(null); }
+  };
+
+  const handlePopulateAll = async () => {
+    setPopulating(true);
+    try {
+      await api.post('/weekly-report/populate-all', {});
+      await loadTeamReports();
+    } catch (err) { console.error(err); }
+    finally { setPopulating(false); }
+  };
+
+  const weekLabel = weekOf ? new Date(weekOf + 'T00:00:00').toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' }) : '';
+
+  if (loading) {
+    return (
+      <div className="flex justify-center py-12">
+        <div className="w-8 h-8 border-3 border-brand-400 border-t-transparent rounded-full animate-spin" />
+      </div>
+    );
+  }
+
+  // Only show reps (not admin/manager in the team view)
+  const repReports = reports.filter(r => r.first_name && r.last_name);
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <div>
+          <h3 className="text-sm font-bold text-navy-700">Week of {weekLabel}</h3>
+          <p className="text-xs text-navy-400 mt-0.5">{repReports.length} reports · Live data updates on each page load</p>
+        </div>
+        <button
+          onClick={handlePopulateAll}
+          disabled={populating}
+          className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-navy-100 hover:bg-navy-200 text-navy-700 rounded-xl transition-colors disabled:opacity-50"
+        >
+          <RefreshCw className={`w-3.5 h-3.5 ${populating ? 'animate-spin' : ''}`} />
+          {populating ? 'Refreshing...' : 'Refresh All Stats'}
+        </button>
+      </div>
+
+      {repReports.map(r => {
+        const isExpanded = expandedId === r.id;
+        const ds = r.data_summary;
+
+        return (
+          <div key={r.id} className="bg-white/80 backdrop-blur-sm rounded-2xl border border-navy-100 shadow-card overflow-hidden">
+            {/* Header row — always visible */}
+            <button
+              onClick={() => toggleExpand(r.id)}
+              className="w-full flex items-center justify-between px-4 py-3 hover:bg-navy-50/30 transition-colors text-left"
+            >
+              <div className="flex items-center gap-3">
+                <div className="w-9 h-9 rounded-full bg-brand-50 flex items-center justify-center text-brand-700 font-semibold text-sm">
+                  {r.first_name?.[0]}{r.last_name?.[0]}
+                </div>
+                <div>
+                  <div className="text-sm font-semibold text-navy-900">{r.first_name} {r.last_name}</div>
+                  <div className="flex items-center gap-2 mt-0.5">
+                    <span className={`text-xs px-2 py-0.5 rounded-full ${r.status === 'submitted' ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}`}>
+                      {r.status}
+                    </span>
+                    {ds && (
+                      <span className="text-xs text-navy-400">
+                        ${Number(ds.sales_mtd).toLocaleString('en-US', { maximumFractionDigits: 0 })} MTD
+                      </span>
+                    )}
+                    {r.comment_count > 0 && (
+                      <span className="flex items-center gap-0.5 text-xs text-brand-600">
+                        <MessageSquare className="w-3 h-3" /> {r.comment_count}
+                      </span>
+                    )}
+                  </div>
+                </div>
+              </div>
+              <div className="flex items-center gap-3">
+                <div className="text-right hidden sm:block">
+                  <div className="text-xs text-navy-400">Weekly Sales</div>
+                  <div className="text-sm font-bold text-navy-900">${Number(r.stats_weekly_sales).toLocaleString('en-US', { maximumFractionDigits: 0 })}</div>
+                </div>
+                {isExpanded ? <ChevronUp className="w-4 h-4 text-navy-400" /> : <ChevronDown className="w-4 h-4 text-navy-400" />}
+              </div>
+            </button>
+
+            {/* Expanded detail */}
+            {isExpanded && (
+              <div className="border-t border-navy-100 px-4 py-4 space-y-4">
+                {/* Data snapshot inline */}
+                {ds && (
+                  <div className="bg-gradient-to-r from-navy-50 to-blue-50 rounded-xl p-4">
+                    <div className="grid sm:grid-cols-3 gap-4">
+                      <div>
+                        <div className="text-xs font-semibold text-navy-500 mb-1">Sales Comparison</div>
+                        <div className="text-lg font-bold text-navy-900">${Number(ds.sales_mtd).toLocaleString('en-US', { maximumFractionDigits: 0 })}<span className="text-xs text-navy-400 ml-1">{ds.current_month_name} MTD</span></div>
+                        <div className="text-sm text-navy-600">${Number(ds.sales_prior_month).toLocaleString('en-US', { maximumFractionDigits: 0 })}<span className="text-xs text-navy-400 ml-1">{ds.prior_month_name} Total</span></div>
+                        {ds.sales_prior_month > 0 && (
+                          <div className={`flex items-center gap-1 mt-1 text-xs font-semibold ${ds.sales_mtd >= ds.sales_prior_month ? 'text-emerald-600' : 'text-red-500'}`}>
+                            {ds.sales_mtd >= ds.sales_prior_month ? <TrendingUp className="w-3 h-3" /> : <TrendingDown className="w-3 h-3" />}
+                            {ds.sales_mtd >= ds.sales_prior_month ? '+' : ''}{((ds.sales_mtd - ds.sales_prior_month) / ds.sales_prior_month * 100).toFixed(0)}%
+                          </div>
+                        )}
+                      </div>
+                      <div>
+                        <div className="text-xs font-semibold text-red-500 mb-1">Off-Cadence</div>
+                        {ds.off_cadence.length === 0 ? (
+                          <p className="text-xs text-navy-400">All on track</p>
+                        ) : ds.off_cadence.map((c, i) => (
+                          <div key={i} className="mb-1">
+                            <div className="text-sm font-medium text-navy-800 truncate">{c.customer_name}</div>
+                            <div className="text-xs text-navy-400">${Number(c.prev_period).toLocaleString()} prev 3mo</div>
+                          </div>
+                        ))}
+                      </div>
+                      <div>
+                        <div className="text-xs font-semibold text-navy-500 mb-1">Category Gaps</div>
+                        {ds.pcr_gaps.length === 0 ? (
+                          <p className="text-xs text-navy-400">No gaps</p>
+                        ) : ds.pcr_gaps.slice(0, 2).map((s, i) => (
+                          <div key={i} className="mb-1">
+                            <div className="text-sm font-medium text-navy-800 truncate">{s.customer_name} <span className="text-xs text-navy-400">(${Number(s.total).toLocaleString('en-US', { maximumFractionDigits: 0 })})</span></div>
+                            <div className="text-xs text-red-500 truncate">{s.missing.slice(0, 3).join(', ')}{s.missing.length > 3 ? ` +${s.missing.length - 3}` : ''}</div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* Stats row */}
+                <div className="grid grid-cols-3 sm:grid-cols-6 gap-2">
+                  <div className="text-center p-2 bg-navy-50 rounded-xl">
+                    <div className="text-lg font-bold text-navy-900">{r.stats_accounts_contacted}</div>
+                    <div className="text-[10px] text-navy-500">Contacted</div>
+                  </div>
+                  <div className="text-center p-2 bg-navy-50 rounded-xl">
+                    <div className="text-lg font-bold text-navy-900">{r.stats_new_accounts}</div>
+                    <div className="text-[10px] text-navy-500">New Accts</div>
+                  </div>
+                  <div className="text-center p-2 bg-navy-50 rounded-xl">
+                    <div className="text-lg font-bold text-navy-900">{r.stats_activities_logged}</div>
+                    <div className="text-[10px] text-navy-500">Activities</div>
+                  </div>
+                  <div className="text-center p-2 bg-navy-50 rounded-xl">
+                    <div className="text-lg font-bold text-navy-900">{r.stats_follow_ups_due}</div>
+                    <div className="text-[10px] text-navy-500">Follow-Ups</div>
+                  </div>
+                  <div className="text-center p-2 bg-navy-50 rounded-xl">
+                    <div className="text-lg font-bold text-navy-900">${Number(r.stats_weekly_sales).toLocaleString('en-US', { maximumFractionDigits: 0 })}</div>
+                    <div className="text-[10px] text-navy-500">Weekly Sales</div>
+                  </div>
+                  <div className="text-center p-2 bg-navy-50 rounded-xl">
+                    <div className="text-lg font-bold text-navy-900">{r.stats_dormant_accounts}</div>
+                    <div className="text-[10px] text-navy-500">Dormant</div>
+                  </div>
+                </div>
+
+                {/* Survey responses */}
+                <div className="space-y-3">
+                  {SURVEY_SECTIONS.map(s => {
+                    const val = (r as any)[s.key];
+                    if (!val) return null;
+                    const Icon = s.icon;
+                    return (
+                      <div key={s.key}>
+                        <h4 className="text-xs font-bold text-navy-500 uppercase tracking-wider mb-1 flex items-center gap-1">
+                          <Icon className={`w-3 h-3 ${s.color}`} /> {s.label}
+                        </h4>
+                        <p className="text-sm text-navy-700 whitespace-pre-wrap bg-navy-50/50 rounded-xl px-3 py-2">{val}</p>
+                      </div>
+                    );
+                  })}
+                  {SURVEY_SECTIONS.every(s => !(r as any)[s.key]) && (
+                    <p className="text-sm text-navy-400 italic">No commentary submitted yet</p>
+                  )}
+                </div>
+
+                {/* Comments section */}
+                <div className="border-t border-navy-100 pt-3">
+                  <h4 className="text-xs font-bold text-navy-500 uppercase tracking-wider mb-2 flex items-center gap-1">
+                    <MessageSquare className="w-3 h-3" /> Manager Comments
+                  </h4>
+                  <div className="space-y-2 mb-3">
+                    {(comments[r.id] || []).map(c => (
+                      <div key={c.id} className="bg-brand-50/50 rounded-xl px-3 py-2">
+                        <div className="flex items-center gap-2 mb-0.5">
+                          <span className="text-xs font-semibold text-brand-700">{c.first_name} {c.last_name}</span>
+                          <span className="text-[10px] text-navy-400">{new Date(c.created_at).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}</span>
+                        </div>
+                        <p className="text-sm text-navy-700">{c.content}</p>
+                      </div>
+                    ))}
+                    {comments[r.id] && comments[r.id].length === 0 && (
+                      <p className="text-xs text-navy-400">No comments yet</p>
+                    )}
+                  </div>
+                  <div className="flex gap-2">
+                    <input
+                      type="text"
+                      value={commentText[r.id] || ''}
+                      onChange={e => setCommentText(prev => ({ ...prev, [r.id]: e.target.value }))}
+                      onKeyDown={e => { if (e.key === 'Enter') addComment(r.id); }}
+                      placeholder="Add a comment..."
+                      className="flex-1 text-sm border border-navy-200 rounded-xl px-3 py-2 focus:outline-none focus:ring-2 focus:ring-brand-300"
+                    />
+                    <button
+                      onClick={() => addComment(r.id)}
+                      disabled={sendingComment === r.id || !(commentText[r.id] || '').trim()}
+                      className="px-3 py-2 bg-brand-600 hover:bg-brand-700 text-white text-sm font-medium rounded-xl transition-colors disabled:opacity-50"
+                    >
+                      {sendingComment === r.id ? '...' : 'Send'}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 }

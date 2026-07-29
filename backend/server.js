@@ -4095,6 +4095,15 @@ async function startServer() {
         }
       }
 
+      // Lead vs Lead scan (find duplicate leads)
+      if (scanMode === 'lead_vs_lead' || scanMode === 'all') {
+        for (let i = 0; i < leads.length; i++) {
+          for (let j = i + 1; j < leads.length; j++) {
+            await processPair(leads[i], leads[j], 'lead_vs_lead');
+          }
+        }
+      }
+
       duplicates.sort((a, b) => b.score - a.score);
       res.json({ success: true, count: duplicates.length, duplicates, leadsScanned: leads.length, activesScanned: actives.length, mode: scanMode });
     } catch (e) { res.status(500).json({ error: e.message }); }

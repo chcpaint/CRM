@@ -64,6 +64,13 @@ interface AdminSummaryRep {
   weeks: { week_of: string; status: string; submitted_at: string | null }[];
 }
 
+// Helper: safely parse week_of dates (handles both "2026-07-27" and "2026-07-27T00:00:00.000Z")
+const parseWeekDate = (wo: string, opts: Intl.DateTimeFormatOptions = { month: 'long', day: 'numeric', year: 'numeric' }) => {
+  if (!wo) return '';
+  const dateStr = wo.substring(0, 10); // always take YYYY-MM-DD
+  return new Date(dateStr + 'T00:00:00').toLocaleDateString('en-US', opts);
+};
+
 const SURVEY_SECTIONS = [
   { key: 'sales_opportunities', label: 'Sales Opportunities', placeholder: 'What new sales opportunities did you identify this week? Any hot leads or near-closes?', icon: DollarSign, color: 'text-emerald-600' },
   { key: 'product_opportunities', label: 'Product Opportunities', placeholder: 'Any product requests, gaps, or cross-sell/upsell opportunities?', icon: BarChart3, color: 'text-blue-600' },
@@ -206,7 +213,7 @@ export default function WeeklyReportPage({ user }: { user: User }) {
     } catch (err) { console.error(err); }
   };
 
-  const weekOfDisplay = report ? new Date(report.week_of + 'T00:00:00').toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' }) : '';
+  const weekOfDisplay = report ? parseWeekDate(report.week_of) : '';
   const isSubmitted = report?.status === 'submitted';
 
   // Use Eastern Time for cutover logic (Saturday 5 PM ET = locked)
@@ -299,7 +306,7 @@ export default function WeeklyReportPage({ user }: { user: User }) {
                 >
                   <div>
                     <span className="text-sm font-medium text-navy-800">
-                      Week of {new Date(h.week_of + 'T00:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+                      Week of {parseWeekDate(h.week_of, { month: 'short', day: 'numeric' })}
                     </span>
                     <span className={`ml-2 text-xs px-2 py-0.5 rounded-full ${h.status === 'submitted' ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}`}>
                       {h.status}
@@ -319,7 +326,7 @@ export default function WeeklyReportPage({ user }: { user: User }) {
           <div className="bg-white rounded-2xl shadow-2xl max-w-2xl w-full max-h-[85vh] overflow-y-auto p-6" onClick={e => e.stopPropagation()}>
             <div className="flex items-center justify-between mb-4">
               <h3 className="text-lg font-bold text-navy-900">
-                Week of {new Date(viewingReport.week_of + 'T00:00:00').toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })}
+                Week of {parseWeekDate(viewingReport.week_of)}
               </h3>
               <button onClick={() => setViewingReport(null)} className="p-2 hover:bg-navy-100 rounded-xl">
                 <span className="text-navy-500 text-lg">&times;</span>
@@ -653,7 +660,7 @@ function TeamReports({ user }: { user: User }) {
     finally { setPopulating(false); }
   };
 
-  const weekLabel = weekOf ? new Date(weekOf + 'T00:00:00').toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' }) : '';
+  const weekLabel = weekOf ? parseWeekDate(weekOf) : '';
 
   if (loading) {
     return (
@@ -968,7 +975,7 @@ function AdminTracker({
           <div className="bg-white rounded-2xl shadow-2xl max-w-2xl w-full max-h-[85vh] overflow-y-auto p-6" onClick={e => e.stopPropagation()}>
             <div className="flex items-center justify-between mb-4">
               <h3 className="text-lg font-bold text-navy-900">
-                {viewReport.first_name} {viewReport.last_name} — Week of {new Date(viewReport.week_of + 'T00:00:00').toLocaleDateString('en-US', { month: 'long', day: 'numeric' })}
+                {viewReport.first_name} {viewReport.last_name} — Week of {parseWeekDate(viewReport.week_of, { month: 'long', day: 'numeric' })}
               </h3>
               <button onClick={onCloseView} className="p-2 hover:bg-navy-100 rounded-xl">
                 <span className="text-navy-500 text-lg">&times;</span>
@@ -1001,7 +1008,7 @@ function AdminTracker({
                   >
                     <div>
                       <span className="text-sm font-medium text-navy-800">
-                        Week of {new Date(r.week_of + 'T00:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
+                        Week of {parseWeekDate(r.week_of, { month: 'short', day: 'numeric', year: 'numeric' })}
                       </span>
                       <span className={`ml-2 text-xs px-2 py-0.5 rounded-full ${r.status === 'submitted' ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}`}>
                         {r.status}

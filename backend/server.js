@@ -3317,7 +3317,7 @@ async function startServer() {
       }
 
       const reps = await queryAll(
-        `SELECT id, first_name, last_name FROM users WHERE role = 'rep' AND is_active = true ORDER BY last_name, first_name`, []
+        `SELECT id, first_name, last_name FROM users WHERE role = 'rep' AND is_active = true AND show_in_weekly_report = true ORDER BY last_name, first_name`, []
       );
 
       const reports = await queryAll(
@@ -3369,7 +3369,7 @@ async function startServer() {
         `SELECT wr.*, u.first_name, u.last_name
          FROM weekly_reports wr
          JOIN users u ON u.id = wr.rep_id
-         WHERE wr.week_of = $1 AND u.is_active = true
+         WHERE wr.week_of = $1 AND u.is_active = true AND u.show_in_weekly_report = true
          ORDER BY u.first_name, u.last_name`,
         [weekOf]
       );
@@ -3412,7 +3412,7 @@ async function startServer() {
 
       // Get all users
       const users = await queryAll(
-        `SELECT id FROM users WHERE role IN ('rep','admin','manager') AND is_active = true ORDER BY id`, []
+        `SELECT id FROM users WHERE role IN ('rep','admin','manager') AND is_active = true AND show_in_weekly_report = true ORDER BY id`, []
       );
 
       let populated = 0;
@@ -3494,7 +3494,7 @@ async function startServer() {
       const totalWeeks = mondays.length;
 
       const reps = await queryAll(
-        `SELECT id, first_name, last_name, email FROM users WHERE role = 'rep' AND is_active = true ORDER BY last_name, first_name`, []
+        `SELECT id, first_name, last_name, email FROM users WHERE role = 'rep' AND is_active = true AND show_in_weekly_report = true ORDER BY last_name, first_name`, []
       );
 
       const reports = await queryAll(

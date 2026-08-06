@@ -136,7 +136,7 @@ export default function DashboardPage({ user }: Props) {
   // Keep the all-accounts total for pipeline percentage math so the bars still add up to 100%.
   const pipelineTotal = metrics.totalAccounts;
 
-  const fmtMoney = (n: number) => '$' + n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const fmtMoney = (n: number | null | undefined) => '$' + (n ?? 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
   return (
     <div>

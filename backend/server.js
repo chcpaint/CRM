@@ -4251,6 +4251,130 @@ async function startServer() {
   });
   console.log('  Holds sync: scheduled every 6 hours (0:15, 6:15, 12:15, 18:15 UTC)');
 
+  // ============================================================================
+  //  BRANCH DAILY REVENUE SYNC FROM CHC INTRANET
+  // ============================================================================
+  // Fetches daily_target_report from intranet and populates branch_daily_revenue.
+  // Previously handled by a Supabase edge function (not in git); now in server.js.
+
+  async function syncBranchRevenue() {
+    console.log('[Branch Revenue Sync] Starting sync from CHC Intranet...');
+    const startTime = Date.now();
+
+    // 1. Fetch daily_target_report from intranet (only months with actual data)
+    const url = `${INTRANET_URL}/rest/v1/daily_target_report?select=id,year,month,day_data,updated_at&order=id.asc`;
+    const resp = await fetch(url, {
+      headers: { 'apikey': INTRANET_KEY, 'Authorization': `Bearer ${INTRANET_KEY}` }
+    });
+    if (!resp.ok) throw new Error(`Intranet fetch failed: ${resp.status} ${resp.statusText}`);
+    const reports = await resp.json();
+    console.log(`[Branch Revenue Sync] Fetched ${reports.length} monthly reports from intranet`);
+
+    // 2. Parse all day_data into flat rows
+    const rows = [];
+    for (const report of reports) {
+      if (!report.day_data || !Array.isArray(report.day_data)) continue;
+      const monthStr = `${report.year}-${String(report.month).padStart(2, '0')}`;
+      for (const day of report.day_data) {
+        if (!day.date || !day.sales) continue;
+        for (const [branchCode, amount] of Object.entries(day.sales)) {
+          if (typeof amount !== 'number' || amount === 0) continue;
+          rows.push({ date: day.date, month: monthStr, branch_name: branchCode, revenue: amount });
+        }
+      }
+    }
+    console.log(`[Branch Revenue Sync] Parsed ${rows.length} daily branch revenue rows`);
+
+    if (rows.length === 0) {
+      return { upserted: 0, elapsed_sec: ((Date.now() - startTime) / 1000).toFixed(1) };
+    }
+
+    // 3. Upsert into branch_daily_revenue (batch of 500)
+    const client = await getPool().connect();
+    let upserted = 0;
+    try {
+      // Ensure the table and unique constraint exist
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS branch_daily_revenue (
+          id SERIAL PRIMARY KEY,
+          date DATE NOT NULL,
+          month TEXT NOT NULL,
+          branch_name TEXT NOT NULL,
+          revenue NUMERIC(12,2) NOT NULL DEFAULT 0,
+          synced_at TIMESTAMPTZ DEFAULT NOW(),
+          UNIQUE(date, branch_name)
+        )
+      `);
+      // Create index on month for fast dashboard queries
+      await client.query(`CREATE INDEX IF NOT EXISTS idx_bdr_month ON branch_daily_revenue(month)`);
+
+      await client.query('BEGIN');
+      const batchSize = 500;
+      for (let i = 0; i < rows.length; i += batchSize) {
+        const batch = rows.slice(i, i + batchSize);
+        const values = [];
+        const placeholders = [];
+        let idx = 1;
+        for (const r of batch) {
+          placeholders.push(`($${idx}, $${idx+1}, $${idx+2}, $${idx+3}, NOW())`);
+          values.push(r.date, r.month, r.branch_name, r.revenue);
+          idx += 4;
+        }
+        const result = await client.query(`
+          INSERT INTO branch_daily_revenue (date, month, branch_name, revenue, synced_at)
+          VALUES ${placeholders.join(', ')}
+          ON CONFLICT (date, branch_name) DO UPDATE SET
+            revenue = EXCLUDED.revenue,
+            synced_at = NOW()
+        `, values);
+        upserted += result.rowCount;
+      }
+      await client.query('COMMIT');
+    } catch (e) {
+      await client.query('ROLLBACK');
+      throw e;
+    } finally {
+      client.release();
+    }
+
+    const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+    const summary = { upserted, elapsed_sec: elapsed, synced_at: new Date().toISOString() };
+    console.log(`[Branch Revenue Sync] Complete:`, JSON.stringify(summary));
+    return summary;
+  }
+
+  // Manual trigger endpoint
+  app.post('/api/admin/sync-branch-revenue', authenticate, async (req, res) => {
+    if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
+    try {
+      const result = await syncBranchRevenue();
+      res.json({ success: true, ...result });
+    } catch (e) {
+      console.error('[Branch Revenue Sync] Manual trigger failed:', e);
+      res.status(500).json({ success: false, error: e.message });
+    }
+  });
+
+  // Cron: sync branch revenue every 4 hours (at :30 past to avoid collisions)
+  cron.schedule('30 */4 * * *', async () => {
+    try {
+      await syncBranchRevenue();
+    } catch (err) {
+      console.error('[Branch Revenue Sync Cron] Failed:', err.message);
+    }
+  });
+  console.log('  Branch revenue sync: scheduled every 4 hours (0:30, 4:30, 8:30, 12:30, 16:30, 20:30 UTC)');
+
+  // Run once on startup (after a short delay to let DB connections settle)
+  setTimeout(async () => {
+    try {
+      console.log('[Branch Revenue Sync] Running initial sync on startup...');
+      await syncBranchRevenue();
+    } catch (err) {
+      console.error('[Branch Revenue Sync] Startup sync failed:', err.message);
+    }
+  }, 15000);
+
   // ─── CHECK PCR MATCH: check if a lead has a matching PCR shop ───
   app.get('/api/accounts/:id/pcr-match', authenticate, async (req, res) => {
     try {

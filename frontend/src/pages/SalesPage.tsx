@@ -21,8 +21,8 @@ export default function SalesPage({ user }: Props) {
   const [revSummary, setRevSummary] = useState<{
     year: string;
     currentMonth: string;
-    salespersons: { salesperson: string; ytd_revenue: number; month_revenue: number }[];
-    company: { ytd_total: number; month_total: number };
+    salespersons: { salesperson: string; raw_ytd_revenue: number; raw_month_revenue: number; ytd_revenue: number; month_revenue: number }[];
+    company: { raw_ytd_total: number; raw_month_total: number; ytd_total: number; month_total: number };
   } | null>(null);
   const [revError, setRevError] = useState(false);
 
@@ -371,8 +371,12 @@ export default function SalesPage({ user }: Props) {
               filterSalesperson ? s.salesperson === filterSalesperson : true
             ) || revSummary.salespersons[0]
           : null;
-        const showMonth = spData ? spData.month_revenue : revSummary.company.month_total;
-        const showYtd = spData ? spData.ytd_revenue : revSummary.company.ytd_total;
+        // Primary: raw line-item totals (matches PACS/PCR)
+        const showMonth = spData ? (spData.raw_month_revenue ?? spData.month_revenue) : (revSummary.company.raw_month_total ?? revSummary.company.month_total);
+        const showYtd = spData ? (spData.raw_ytd_revenue ?? spData.ytd_revenue) : (revSummary.company.raw_ytd_total ?? revSummary.company.ytd_total);
+        // Secondary: actual invoiced revenue (post-discount, scaled to branch_daily_revenue)
+        const actualMonth = spData ? spData.month_revenue : revSummary.company.month_total;
+        const actualYtd = spData ? spData.ytd_revenue : revSummary.company.ytd_total;
         const label = isRepUser
           ? (spData?.salesperson || 'My Sales')
           : (filterSalesperson || 'All Salespersons');
@@ -390,18 +394,28 @@ export default function SalesPage({ user }: Props) {
               <div className="text-sm font-bold text-green-900 min-w-0 truncate">{label}</div>
               <div className="flex flex-wrap items-center gap-4 sm:gap-6">
                 {showMonthSection && (
-                  <div className="flex items-baseline gap-1.5">
-                    <span className="text-lg sm:text-xl font-bold text-green-800">{fmtRev(showMonth)}</span>
-                    <span className="text-xs text-green-600 font-semibold">({monthName})</span>
+                  <div>
+                    <div className="flex items-baseline gap-1.5">
+                      <span className="text-lg sm:text-xl font-bold text-green-800">{fmtRev(showMonth)}</span>
+                      <span className="text-xs text-green-600 font-semibold">({monthName})</span>
+                    </div>
+                    {actualMonth !== showMonth && (
+                      <div className="text-[10px] text-green-500 mt-0.5">Invoiced: {fmtRev(actualMonth)}</div>
+                    )}
                   </div>
                 )}
-                <div className="flex items-baseline gap-1.5">
-                  <span className={`font-bold text-green-800 ${showMonthSection ? 'text-base' : 'text-lg sm:text-xl'}`}>
-                    {fmtRev(showYtd)}
-                  </span>
-                  <span className="text-xs text-green-600 font-semibold">
-                    ({filterYear === 'all' ? 'All Time' : `YTD ${yr}`})
-                  </span>
+                <div>
+                  <div className="flex items-baseline gap-1.5">
+                    <span className={`font-bold text-green-800 ${showMonthSection ? 'text-base' : 'text-lg sm:text-xl'}`}>
+                      {fmtRev(showYtd)}
+                    </span>
+                    <span className="text-xs text-green-600 font-semibold">
+                      ({filterYear === 'all' ? 'All Time' : `YTD ${yr}`})
+                    </span>
+                  </div>
+                  {actualYtd !== showYtd && (
+                    <div className="text-[10px] text-green-500 mt-0.5">Invoiced: {fmtRev(actualYtd)}</div>
+                  )}
                 </div>
               </div>
             </div>
@@ -409,14 +423,14 @@ export default function SalesPage({ user }: Props) {
             {!filterSalesperson && !isRepUser && revSummary.salespersons.length > 0 && (
               <div className="mt-2 pt-2 border-t border-green-200 grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-x-4 gap-y-1.5">
                 {revSummary.salespersons
-                  .filter(s => showMonthSection ? s.month_revenue > 0 : s.ytd_revenue > 0)
+                  .filter(s => showMonthSection ? (s.raw_month_revenue ?? s.month_revenue) > 0 : (s.raw_ytd_revenue ?? s.ytd_revenue) > 0)
                   .map(s => (
                   <div key={s.salesperson} className="flex items-baseline justify-between gap-2 text-xs">
                     <span className="text-green-800 truncate font-medium">{s.salesperson}</span>
                     <span className="font-bold text-green-900 tabular-nums flex-shrink-0">
                       {showMonthSection
-                        ? fmtRev(s.month_revenue)
-                        : fmtRev(s.ytd_revenue)
+                        ? fmtRev(s.raw_month_revenue ?? s.month_revenue)
+                        : fmtRev(s.raw_ytd_revenue ?? s.ytd_revenue)
                       }
                       <span className="text-green-500 font-normal ml-1">
                         ({showMonthSection ? monthName.slice(0, 3) : 'YTD'})

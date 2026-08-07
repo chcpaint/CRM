@@ -1040,7 +1040,9 @@ async function startServer() {
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
 
-  // ─── SALES REVENUE SUMMARY (correct post-discount figures) ───
+  // ─── SALES REVENUE SUMMARY ───
+  // Returns both raw line-item totals (matches PACS/PCR) and actual invoiced
+  // revenue (proportionally scaled to branch_daily_revenue post-discount totals).
   app.get('/api/sales/revenue-summary', authenticate, async (req, res) => {
     try {
       const year = req.query.year || String(new Date().getFullYear());
@@ -1078,6 +1080,8 @@ async function startServer() {
             GROUP BY month, branch_name
           )
           SELECT ri.salesperson,
+                 SUM(ri.sp_amount) as raw_ytd_revenue,
+                 SUM(CASE WHEN ri.month = $2 THEN ri.sp_amount ELSE 0 END) as raw_month_revenue,
                  SUM(CASE WHEN bi.branch_amount > 0
                    THEN ri.sp_amount / bi.branch_amount * br.actual_revenue
                    ELSE ri.sp_amount END) as ytd_revenue,
@@ -1090,7 +1094,7 @@ async function startServer() {
           LEFT JOIN branch_items bi ON bi.month = ri.month AND bi.branch = ri.branch
           LEFT JOIN branch_rev br ON br.month = ri.month AND br.branch = ri.branch
           GROUP BY ri.salesperson
-          ORDER BY ytd_revenue DESC
+          ORDER BY raw_ytd_revenue DESC
         `, [year, currentMonth, uid]);
       } else {
         // Admin/manager sees all salespersons — group by rep_id to consolidate name variants
@@ -1127,6 +1131,8 @@ async function startServer() {
             GROUP BY month, branch_name
           )
           SELECT sn.salesperson,
+                 SUM(sp.sp_amount) as raw_ytd_revenue,
+                 SUM(CASE WHEN sp.month = $2 THEN sp.sp_amount ELSE 0 END) as raw_month_revenue,
                  SUM(CASE WHEN bi.branch_amount > 0
                    THEN sp.sp_amount / bi.branch_amount * br.actual_revenue
                    ELSE sp.sp_amount END) as ytd_revenue,
@@ -1140,24 +1146,40 @@ async function startServer() {
           LEFT JOIN branch_items bi ON bi.month = sp.month AND bi.branch = sp.branch
           LEFT JOIN branch_rev br ON br.month = sp.month AND br.branch = sp.branch
           GROUP BY sn.salesperson
-          ORDER BY ytd_revenue DESC
+          ORDER BY raw_ytd_revenue DESC
         `, [year, currentMonth]);
       }
 
-      // Company totals from branch_daily_revenue (admins see full total, reps see their share)
+      // Company totals: raw from sales_data, actual from branch_daily_revenue
       let companyTotals;
       if (isRep) {
-        // For reps, "company" totals = their own totals (sum of the rows above)
-        const ytd = rows.reduce((s, r) => s + (parseFloat(r.ytd_revenue) || 0), 0);
-        const mo = rows.reduce((s, r) => s + (parseFloat(r.month_revenue) || 0), 0);
-        companyTotals = { ytd_total: ytd, month_total: mo };
+        companyTotals = {
+          raw_ytd_total: rows.reduce((s, r) => s + (parseFloat(r.raw_ytd_revenue) || 0), 0),
+          raw_month_total: rows.reduce((s, r) => s + (parseFloat(r.raw_month_revenue) || 0), 0),
+          ytd_total: rows.reduce((s, r) => s + (parseFloat(r.ytd_revenue) || 0), 0),
+          month_total: rows.reduce((s, r) => s + (parseFloat(r.month_revenue) || 0), 0)
+        };
       } else {
-        companyTotals = await queryOne(`
+        const rawTotals = await queryOne(`
+          SELECT
+            COALESCE(SUM(sale_amount), 0) as raw_ytd_total,
+            COALESCE(SUM(CASE WHEN month = $2 THEN sale_amount ELSE 0 END), 0) as raw_month_total
+          FROM sales_data
+          WHERE salesperson IS NOT NULL AND salesperson != ''
+            AND sale_date >= $1 || '-01-01' AND sale_date <= $1 || '-12-31'
+        `, [year, currentMonth]);
+        const bdrTotals = await queryOne(`
           SELECT
             COALESCE(SUM(CASE WHEN month >= $1 || '-01' AND month <= $1 || '-12' THEN revenue ELSE 0 END), 0) as ytd_total,
             COALESCE(SUM(CASE WHEN month = $2 THEN revenue ELSE 0 END), 0) as month_total
           FROM branch_daily_revenue
         `, [year, currentMonth]);
+        companyTotals = {
+          raw_ytd_total: parseFloat(rawTotals?.raw_ytd_total) || 0,
+          raw_month_total: parseFloat(rawTotals?.raw_month_total) || 0,
+          ytd_total: parseFloat(bdrTotals?.ytd_total) || 0,
+          month_total: parseFloat(bdrTotals?.month_total) || 0
+        };
       }
 
       res.json({
@@ -1166,12 +1188,16 @@ async function startServer() {
         isRep,
         salespersons: rows.map(r => ({
           salesperson: r.salesperson,
+          raw_ytd_revenue: parseFloat(r.raw_ytd_revenue) || 0,
+          raw_month_revenue: parseFloat(r.raw_month_revenue) || 0,
           ytd_revenue: parseFloat(r.ytd_revenue) || 0,
           month_revenue: parseFloat(r.month_revenue) || 0
         })),
         company: {
-          ytd_total: parseFloat(companyTotals?.ytd_total) || 0,
-          month_total: parseFloat(companyTotals?.month_total) || 0
+          raw_ytd_total: companyTotals.raw_ytd_total,
+          raw_month_total: companyTotals.raw_month_total,
+          ytd_total: companyTotals.ytd_total,
+          month_total: companyTotals.month_total
         }
       });
     } catch (e) { res.status(500).json({ error: e.message }); }

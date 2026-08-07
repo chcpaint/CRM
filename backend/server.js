@@ -5723,6 +5723,94 @@ async function startServer() {
   const BUILD_VERSION = process.env.RENDER_GIT_COMMIT || process.env.GIT_COMMIT || 'dev';
   const BUILD_STARTED_AT = new Date().toISOString();
 
+  // ─── SALES DIAGNOSTIC: raw vs scaled comparison for a rep ───
+  app.get('/api/admin/sales-diagnostic', authenticate, async (req, res) => {
+    if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
+    try {
+      const repId = req.query.rep_id;
+      const year = req.query.year || '2026';
+      if (!repId) return res.status(400).json({ error: 'rep_id required' });
+
+      // 1. Raw sales_data totals by month for this rep
+      const rawByMonth = await queryAll(`
+        SELECT month, SUM(sale_amount) as raw_total, COUNT(*) as line_items, COUNT(DISTINCT customer_name) as customers
+        FROM sales_data
+        WHERE rep_id = $1 AND sale_date >= $2 || '-01-01' AND sale_date <= $2 || '-12-31'
+        GROUP BY month ORDER BY month
+      `, [repId, year]);
+
+      // 2. Raw sales_data totals by month for this rep grouped by branch
+      const rawByBranch = await queryAll(`
+        SELECT month, branch, SUM(sale_amount) as rep_amount
+        FROM sales_data
+        WHERE rep_id = $1 AND sale_date >= $2 || '-01-01' AND sale_date <= $2 || '-12-31'
+        GROUP BY month, branch ORDER BY month, branch
+      `, [repId, year]);
+
+      // 3. Total branch sales_data by month/branch (all reps)
+      const branchTotals = await queryAll(`
+        SELECT month, branch, SUM(sale_amount) as branch_total
+        FROM sales_data
+        WHERE branch IS NOT NULL AND sale_date >= $1 || '-01-01' AND sale_date <= $1 || '-12-31'
+        GROUP BY month, branch ORDER BY month, branch
+      `, [year]);
+
+      // 4. branch_daily_revenue by month/branch
+      const bdrTotals = await queryAll(`
+        SELECT month, branch_name as branch, SUM(revenue) as bdr_total
+        FROM branch_daily_revenue
+        WHERE month >= $1 || '-01' AND month <= $1 || '-12'
+        GROUP BY month, branch_name ORDER BY month, branch_name
+      `, [year]);
+
+      // 5. Unlinked sales for this rep's name variants (where rep_id IS NULL)
+      const repUser = await queryOne('SELECT first_name, last_name FROM users WHERE id = $1', [repId]);
+      const unlinked = repUser ? await queryAll(`
+        SELECT month, SUM(sale_amount) as unlinked_total, COUNT(*) as unlinked_lines,
+               array_agg(DISTINCT salesperson) as name_variants
+        FROM sales_data
+        WHERE rep_id IS NULL
+          AND (LOWER(salesperson) LIKE $1 OR LOWER(salesperson) LIKE $2)
+          AND sale_date >= $3 || '-01-01' AND sale_date <= $3 || '-12-31'
+        GROUP BY month ORDER BY month
+      `, [`%${repUser.first_name.toLowerCase()}%`, `%${repUser.last_name.toLowerCase()}%`, year]) : [];
+
+      // 6. Compute what the proportional scaling produces
+      const scaledByMonth = {};
+      for (const rb of rawByBranch) {
+        const bt = branchTotals.find(b => b.month === rb.month && b.branch === rb.branch);
+        const bdr = bdrTotals.find(b => b.month === rb.month && b.branch === rb.branch);
+        const repAmt = parseFloat(rb.rep_amount);
+        const branchAmt = bt ? parseFloat(bt.branch_total) : 0;
+        const bdrAmt = bdr ? parseFloat(bdr.bdr_total) : 0;
+        const scaled = branchAmt > 0 ? (repAmt / branchAmt) * bdrAmt : repAmt;
+        if (!scaledByMonth[rb.month]) scaledByMonth[rb.month] = 0;
+        scaledByMonth[rb.month] += scaled;
+      }
+
+      res.json({
+        rep_id: parseInt(repId),
+        rep_name: repUser ? `${repUser.first_name} ${repUser.last_name}` : 'Unknown',
+        year,
+        raw_by_month: rawByMonth,
+        scaled_by_month: Object.entries(scaledByMonth).map(([month, total]) => ({ month, scaled_total: Math.round(total * 100) / 100 })),
+        unlinked_sales: unlinked,
+        detail_by_branch: rawByBranch.map(rb => {
+          const bt = branchTotals.find(b => b.month === rb.month && b.branch === rb.branch);
+          const bdr = bdrTotals.find(b => b.month === rb.month && b.branch === rb.branch);
+          return {
+            month: rb.month, branch: rb.branch,
+            rep_raw: parseFloat(rb.rep_amount),
+            branch_all_reps_raw: bt ? parseFloat(bt.branch_total) : null,
+            branch_daily_revenue: bdr ? parseFloat(bdr.bdr_total) : null,
+            rep_share_pct: bt ? ((parseFloat(rb.rep_amount) / parseFloat(bt.branch_total)) * 100).toFixed(2) + '%' : null,
+            scaling_factor: (bt && bdr) ? (parseFloat(bdr.bdr_total) / parseFloat(bt.branch_total)).toFixed(4) : null
+          };
+        })
+      });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
   // Lightweight endpoint the frontend polls to detect new deploys
   app.get('/api/version', (_req, res) => {
     res.set('Cache-Control', 'no-store, must-revalidate');

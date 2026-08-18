@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { api } from '../services/api';
+import { openAuthedFile } from '../services/files';
 import { User, Account, Note, Activity, PhoneEntry, EmailEntry, STATUS_LABELS, STATUS_COLORS, StatusType } from '../types';
 import { useVoiceInput } from '../hooks/useVoiceInput';
 import ShopDetails from '../components/accounts/ShopDetails';
@@ -170,7 +171,9 @@ export default function AccountDetailPage({ user }: Props) {
     document_type: string;
     title: string;
     description: string | null;
-    file_path: string;
+    /** False for documents uploaded before file bytes moved into the database —
+     *  their contents did not survive a deploy and they must be re-uploaded. */
+    available?: boolean;
     original_filename: string;
     file_size: number;
     mime_type: string;
@@ -186,6 +189,8 @@ export default function AccountDetailPage({ user }: Props) {
   const [docForm, setDocForm] = useState({ document_type: 'contract', title: '', description: '', expires_at: '' });
   const [docFile, setDocFile] = useState<File | null>(null);
   const [uploadingDoc, setUploadingDoc] = useState(false);
+  const [docError, setDocError] = useState<string | null>(null);
+  const [openingDocId, setOpeningDocId] = useState<number | null>(null);
 
   const DOC_TYPE_LABELS: Record<string, { label: string; icon: string; color: string }> = {
     contract:              { label: 'Contract',              icon: '📄', color: 'bg-blue-100 text-blue-800' },
@@ -223,13 +228,36 @@ export default function AccountDetailPage({ user }: Props) {
         headers: { 'Authorization': `Bearer ${token}` },
         body: formData
       });
-      if (!resp.ok) throw new Error('Upload failed');
+      if (!resp.ok) {
+        const body = await resp.json().catch(() => ({}));
+        throw new Error(body.error || body.message || 'Upload failed');
+      }
+      setDocError(null);
       setShowDocUpload(false);
       setDocForm({ document_type: 'contract', title: '', description: '', expires_at: '' });
       setDocFile(null);
       loadDocuments();
-    } catch (err) { console.error(err); }
+    } catch (err: any) {
+      setDocError(err?.message || 'Upload failed');
+    }
     finally { setUploadingDoc(false); }
+  };
+
+  // Documents live behind an authenticated API route, so they cannot be opened
+  // with a plain link — see openAuthedFile for why.
+  const openDocument = async (doc: AccountDocument, download = false) => {
+    setOpeningDocId(doc.id);
+    setDocError(null);
+    try {
+      await openAuthedFile(`/api/documents/${doc.id}/file`, {
+        download,
+        filename: doc.original_filename || doc.title,
+      });
+    } catch (err: any) {
+      setDocError(err?.message || 'Could not open this document.');
+    } finally {
+      setOpeningDocId(null);
+    }
   };
 
   const deleteDocument = async (docId: number) => {
@@ -1294,6 +1322,14 @@ export default function AccountDetailPage({ user }: Props) {
               </div>
             )}
 
+            {docError && (
+              <div className="bg-red-50 border border-red-200 rounded-lg p-3 mb-3 flex items-start gap-2">
+                <span className="text-red-500 leading-none">&#9888;</span>
+                <p className="text-sm text-red-700 flex-1">{docError}</p>
+                <button onClick={() => setDocError(null)} className="text-red-400 hover:text-red-600">&times;</button>
+              </div>
+            )}
+
             {documents.length === 0 ? (
               <p className="text-navy-400 text-sm py-4 text-center">
                 No documents yet. Upload contracts, pricing agreements, rebates, and more.
@@ -1317,18 +1353,29 @@ export default function AccountDetailPage({ user }: Props) {
                       <div className="space-y-1.5 mb-3">
                         {docs.map(doc => {
                           const isExpired = doc.expires_at && new Date(doc.expires_at) < new Date();
-                          const baseUrl = (import.meta as any).env?.VITE_API_URL || '';
+                          const missing = doc.available === false;
                           return (
                             <div key={doc.id} className="flex items-center justify-between gap-2 p-2.5 rounded-lg border border-navy-100 hover:border-navy-200 bg-white transition group">
                               <div className="min-w-0 flex-1">
-                                <a
-                                  href={`${baseUrl}${doc.file_path}`}
-                                  target="_blank"
-                                  rel="noopener noreferrer"
-                                  className="text-sm font-medium text-brand-600 hover:text-brand-700 hover:underline truncate block"
-                                >
-                                  {doc.title}
-                                </a>
+                                {missing ? (
+                                  <span className="text-sm font-medium text-navy-400 truncate block" title="This file needs to be re-uploaded">
+                                    {doc.title}
+                                  </span>
+                                ) : (
+                                  <button
+                                    type="button"
+                                    onClick={() => openDocument(doc)}
+                                    disabled={openingDocId === doc.id}
+                                    className="text-sm font-medium text-brand-600 hover:text-brand-700 hover:underline truncate block text-left disabled:opacity-60"
+                                  >
+                                    {doc.title}{openingDocId === doc.id ? ' — opening…' : ''}
+                                  </button>
+                                )}
+                                {missing && (
+                                  <div className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded px-1.5 py-0.5 mt-1 inline-block">
+                                    File missing — please re-upload
+                                  </div>
+                                )}
                                 <div className="flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] text-navy-400 mt-0.5">
                                   <span>{doc.original_filename}</span>
                                   {doc.file_size && <span>{formatFileSize(doc.file_size)}</span>}
@@ -1342,13 +1389,24 @@ export default function AccountDetailPage({ user }: Props) {
                                 </div>
                                 {doc.description && <div className="text-xs text-navy-500 mt-0.5">{doc.description}</div>}
                               </div>
-                              <button
-                                onClick={() => deleteDocument(doc.id)}
-                                className="text-navy-300 hover:text-red-500 text-xs opacity-0 group-hover:opacity-100 transition flex-shrink-0"
-                                title="Remove"
-                              >
-                                ✕
-                              </button>
+                              <div className="flex items-center gap-2 flex-shrink-0">
+                                {!missing && (
+                                  <button
+                                    onClick={() => openDocument(doc, true)}
+                                    className="text-navy-400 hover:text-brand-600 text-xs transition"
+                                    title="Download"
+                                  >
+                                    &#8681;
+                                  </button>
+                                )}
+                                <button
+                                  onClick={() => deleteDocument(doc.id)}
+                                  className="text-navy-300 hover:text-red-500 text-xs opacity-0 group-hover:opacity-100 transition"
+                                  title="Remove"
+                                >
+                                  ✕
+                                </button>
+                              </div>
                             </div>
                           );
                         })}

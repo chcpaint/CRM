@@ -14,7 +14,9 @@ async function initDatabase() {
 
   pool = new Pool({
     connectionString,
-    ssl: { rejectUnauthorized: false },
+    // Supabase requires TLS. Local Postgres (dev, CI, integration tests) does
+    // not offer it, so allow it to be turned off explicitly via PGSSL=disable.
+    ssl: process.env.PGSSL === 'disable' ? false : { rejectUnauthorized: false },
     max: 10,
     idleTimeoutMillis: 30000,
     connectionTimeoutMillis: 10000,

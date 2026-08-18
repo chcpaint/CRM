@@ -696,13 +696,10 @@ async function startServer() {
   });
 
   // ─── Contract file upload ───
-  const uploadsDir = path.join(__dirname, 'uploads', 'contracts');
-  if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
+  // Contract files, like account documents, are stored in Postgres rather than
+  // on the container's ephemeral disk.
   const contractUpload = multer({
-    storage: multer.diskStorage({
-      destination: (req, file, cb) => cb(null, uploadsDir),
-      filename: (req, file, cb) => cb(null, `${Date.now()}-${file.originalname.replace(/[^a-zA-Z0-9._-]/g, '_')}`)
-    }),
+    storage: multer.memoryStorage(),
     limits: { fileSize: 10 * 1024 * 1024 }, // 10MB
     fileFilter: (req, file, cb) => {
       const allowed = ['.pdf', '.doc', '.docx', '.png', '.jpg', '.jpeg'];
@@ -714,18 +711,48 @@ async function startServer() {
   app.post('/api/accounts/:id/upload-contract', authenticate, contractUpload.single('contract'), async (req, res) => {
     try {
       if (!req.file) return res.status(400).json({ error: 'No file uploaded or invalid file type' });
-      const filePath = `/uploads/contracts/${req.file.filename}`;
+      const { lastId } = await execute(
+        `INSERT INTO account_contract_files (account_id, filename, mime_type, file_size, file_data, uploaded_by_id)
+         VALUES ($1, $2, $3, $4, $5, $6)`,
+        [req.params.id, req.file.originalname, req.file.mimetype || 'application/octet-stream',
+         req.file.size, req.file.buffer, req.user.userId]
+      );
+      // contract_file_path stays populated for backward compatibility, but now
+      // points at the API route that reads the bytes back out of Postgres.
+      const filePath = `/api/accounts/${req.params.id}/contract-file`;
       await execute('UPDATE accounts SET contract_file_path = $1, updated_at = NOW() WHERE id = $2', [filePath, req.params.id]);
-      await logAudit(req, 'account', parseInt(req.params.id), 'update', { contract_file_path: { from: null, to: filePath } });
+      await logAudit(req, 'account', parseInt(req.params.id), 'update', { contract_file: { id: lastId, filename: req.file.originalname } });
       res.json({ file_path: filePath, filename: req.file.originalname });
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
 
-  // Serve uploaded contract files
-  app.get('/uploads/contracts/:filename', authenticate, (req, res) => {
-    const filePath = path.join(uploadsDir, req.params.filename);
-    if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'File not found' });
-    res.sendFile(filePath);
+  // Serve the most recent contract file for an account, from Postgres.
+  app.get('/api/accounts/:id/contract-file', authenticate, async (req, res) => {
+    try {
+      const row = await queryOne(
+        `SELECT filename, mime_type, file_data FROM account_contract_files
+          WHERE account_id = $1 ORDER BY created_at DESC LIMIT 1`, [req.params.id]);
+      if (!row) {
+        return res.status(410).json({
+          error: 'file_unavailable',
+          message: 'This contract was uploaded before files were stored in the database and is no longer on the server. Please re-upload it.'
+        });
+      }
+      const disposition = req.query.download === '1' ? 'attachment' : 'inline';
+      const name = (row.filename || 'contract').replace(/"/g, '');
+      res.setHeader('Content-Type', row.mime_type || 'application/octet-stream');
+      res.setHeader('Content-Disposition', `${disposition}; filename="${name}"`);
+      res.setHeader('Cache-Control', 'private, max-age=300');
+      res.send(row.file_data);
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
+  // Legacy path — the disk it read from does not survive a deploy.
+  app.get('/uploads/contracts/:filename', authenticate, (_req, res) => {
+    res.status(410).json({
+      error: 'file_unavailable',
+      message: 'Contract files are now served from /api/accounts/:id/contract-file. Files stored under the old path did not survive deployment and must be re-uploaded.'
+    });
   });
 
   // ─── COMPETITIVE MARKET INFO ───
@@ -5347,16 +5374,11 @@ async function startServer() {
   //  DOCUMENT VAULT  (per-account file storage)
   // ============================================================================
 
-  const docsDir = path.join(__dirname, 'uploads', 'documents');
-  if (!fs.existsSync(docsDir)) fs.mkdirSync(docsDir, { recursive: true });
+  // File bytes are stored in Postgres, not on disk. The container filesystem is
+  // ephemeral — anything written to it is destroyed on the next deploy — which is
+  // why competitive_market_info already works this way.
   const documentUpload = multer({
-    storage: multer.diskStorage({
-      destination: (req, file, cb) => cb(null, docsDir),
-      filename: (req, file, cb) => {
-        const ext = path.extname(file.originalname);
-        cb(null, `${req.params.id}-${Date.now()}${ext}`);
-      }
-    }),
+    storage: multer.memoryStorage(),
     limits: { fileSize: 15 * 1024 * 1024 }, // 15MB
     fileFilter: (req, file, cb) => {
       const allowed = ['.pdf', '.doc', '.docx', '.png', '.jpg', '.jpeg', '.xls', '.xlsx', '.csv', '.txt'];
@@ -5368,11 +5390,20 @@ async function startServer() {
   // GET /api/accounts/:id/documents — list all documents for an account
   app.get('/api/accounts/:id/documents', authenticate, async (req, res) => {
     try {
+      // Never select file_data here — the list would carry every file's bytes.
+      // `available` tells the UI whether the file can actually be opened: rows
+      // created before storage moved into Postgres point at a disk that no
+      // longer exists, and must be re-uploaded.
       const docs = await queryAll(
-        `SELECT d.*, u.first_name, u.last_name FROM account_documents d
-         LEFT JOIN users u ON d.uploaded_by_id = u.id
-         WHERE d.account_id = $1 AND d.is_active = TRUE
-         ORDER BY d.document_type, d.created_at DESC`,
+        `SELECT d.id, d.account_id, d.document_type, d.title, d.description,
+                d.original_filename, d.file_size, d.mime_type, d.uploaded_by_id,
+                d.expires_at, d.is_active, d.created_at, d.updated_at,
+                (d.file_data IS NOT NULL) AS available,
+                u.first_name, u.last_name
+           FROM account_documents d
+           LEFT JOIN users u ON d.uploaded_by_id = u.id
+          WHERE d.account_id = $1 AND d.is_active = TRUE
+          ORDER BY d.document_type, d.created_at DESC`,
         [req.params.id]
       );
       res.json({ documents: docs });
@@ -5385,14 +5416,22 @@ async function startServer() {
       if (!req.file) return res.status(400).json({ error: 'No file uploaded or invalid file type' });
       const { document_type, title, description, expires_at } = req.body;
       if (!document_type || !title) return res.status(400).json({ error: 'document_type and title required' });
-      const filePath = `/uploads/documents/${req.file.filename}`;
       const { lastId } = await execute(
-        `INSERT INTO account_documents (account_id, document_type, title, description, file_path, original_filename, file_size, mime_type, uploaded_by_id, expires_at)
+        `INSERT INTO account_documents (account_id, document_type, title, description, file_data, original_filename, file_size, mime_type, uploaded_by_id, expires_at)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
-        [req.params.id, document_type, title, description || null, filePath, req.file.originalname, req.file.size, req.file.mimetype, req.user.userId, expires_at || null]
+        [req.params.id, document_type, title, description || null, req.file.buffer,
+         req.file.originalname, req.file.size, req.file.mimetype || 'application/octet-stream',
+         req.user.userId, expires_at || null]
       );
-      await logAudit(req, 'account_document', lastId, 'create', { title, document_type, account_id: req.params.id });
-      const doc = await queryOne('SELECT d.*, u.first_name, u.last_name FROM account_documents d LEFT JOIN users u ON d.uploaded_by_id = u.id WHERE d.id = $1', [lastId]);
+      await logAudit(req, 'account_document', lastId, 'create', { title, document_type, account_id: req.params.id, size: req.file.size });
+      const doc = await queryOne(
+        `SELECT d.id, d.account_id, d.document_type, d.title, d.description,
+                d.original_filename, d.file_size, d.mime_type, d.uploaded_by_id,
+                d.expires_at, d.is_active, d.created_at, d.updated_at,
+                (d.file_data IS NOT NULL) AS available,
+                u.first_name, u.last_name
+           FROM account_documents d
+           LEFT JOIN users u ON d.uploaded_by_id = u.id WHERE d.id = $1`, [lastId]);
       res.status(201).json({ document: doc });
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
@@ -5406,11 +5445,40 @@ async function startServer() {
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
 
-  // Serve uploaded document files
-  app.get('/uploads/documents/:filename', authenticate, (req, res) => {
-    const filePath = path.join(docsDir, req.params.filename);
-    if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'File not found' });
-    res.sendFile(filePath);
+  // GET /api/documents/:docId/file — stream a document out of Postgres.
+  // Mirrors /api/competitive-market-info/:id/file. The client fetches this with
+  // its bearer token and turns the response into a blob URL; a plain <a href>
+  // could never send the Authorization header, which is why the previous
+  // implementation returned 401 on every click.
+  app.get('/api/documents/:docId/file', authenticate, async (req, res) => {
+    try {
+      const row = await queryOne(
+        'SELECT original_filename, mime_type, file_data FROM account_documents WHERE id = $1 AND is_active = TRUE',
+        [req.params.docId]
+      );
+      if (!row) return res.status(404).json({ error: 'Document not found' });
+      if (!row.file_data) {
+        return res.status(410).json({
+          error: 'file_unavailable',
+          message: 'This document was uploaded before files were stored in the database and its contents are no longer on the server. Please re-upload it.'
+        });
+      }
+      const disposition = req.query.download === '1' ? 'attachment' : 'inline';
+      const name = (row.original_filename || 'document').replace(/"/g, '');
+      res.setHeader('Content-Type', row.mime_type || 'application/octet-stream');
+      res.setHeader('Content-Disposition', `${disposition}; filename="${name}"`);
+      res.setHeader('Cache-Control', 'private, max-age=300');
+      res.send(row.file_data);
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
+  // Legacy path. Nothing can be served from it any more — the disk it pointed at
+  // is wiped on every deploy — so say so plainly instead of 401-ing or 404-ing.
+  app.get('/uploads/documents/:filename', authenticate, (_req, res) => {
+    res.status(410).json({
+      error: 'file_unavailable',
+      message: 'Documents are now served from /api/documents/:id/file. Files stored under the old path did not survive deployment and must be re-uploaded.'
+    });
   });
 
   // ============================================================================

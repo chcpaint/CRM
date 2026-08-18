@@ -456,6 +456,50 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
+-- ─── ACCOUNT DOCUMENT VAULT ────────────────────────────────────────
+-- Per-account file storage (contracts, pricing agreements, rebates...).
+--
+-- File bytes live in Postgres, exactly like competitive_market_info above,
+-- because the app runs on an ephemeral container filesystem: anything written
+-- to disk is destroyed on the next deploy. Documents written to disk by the
+-- original implementation are unrecoverable and must be re-uploaded; their
+-- rows are kept so the history and titles are not lost.
+CREATE TABLE IF NOT EXISTS account_documents (
+  id SERIAL PRIMARY KEY,
+  account_id INTEGER NOT NULL REFERENCES accounts(id),
+  document_type TEXT NOT NULL,
+  title TEXT NOT NULL,
+  description TEXT,
+  file_path TEXT,
+  original_filename TEXT,
+  file_size INTEGER,
+  mime_type TEXT,
+  uploaded_by_id INTEGER REFERENCES users(id),
+  expires_at DATE,
+  is_active BOOLEAN NOT NULL DEFAULT TRUE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+-- file_data is the store of record from now on. Nullable so the pre-existing
+-- disk-backed rows survive the migration and can be reported as unavailable.
+ALTER TABLE account_documents ADD COLUMN IF NOT EXISTS file_data BYTEA;
+CREATE INDEX IF NOT EXISTS idx_account_documents_account
+  ON account_documents(account_id) WHERE is_active = TRUE;
+
+-- Contract files attached directly to an account had the same problem.
+CREATE TABLE IF NOT EXISTS account_contract_files (
+  id SERIAL PRIMARY KEY,
+  account_id INTEGER NOT NULL REFERENCES accounts(id),
+  filename TEXT NOT NULL,
+  mime_type TEXT NOT NULL,
+  file_size INTEGER NOT NULL,
+  file_data BYTEA NOT NULL,
+  uploaded_by_id INTEGER REFERENCES users(id),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_account_contract_files_account
+  ON account_contract_files(account_id);
+
 -- ─── FIX SERIAL SEQUENCES ──────────────────────────────────────────
 -- After bulk imports, serial sequences can fall behind the actual max id,
 -- causing "duplicate key violates unique constraint" on the next INSERT.

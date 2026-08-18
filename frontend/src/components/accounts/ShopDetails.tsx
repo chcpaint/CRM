@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect } from 'react';
 import { Account, User } from '../../types';
 import { api } from '../../services/api';
+import { openAuthedFile } from '../../services/files';
 
 interface RepOption {
   id: number;
@@ -57,6 +58,18 @@ export default function ShopDetails({ account, user, onSave }: Props) {
   const [editing, setEditing] = useState(false);
   const [saving, setSaving] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [contractError, setContractError] = useState<string | null>(null);
+
+  // The contract file is behind an authenticated API route, so a plain link
+  // would arrive without the bearer token and be rejected.
+  const viewContract = async () => {
+    setContractError(null);
+    try {
+      await openAuthedFile(`/api/accounts/${account.id}/contract-file`);
+    } catch (err: any) {
+      setContractError(err?.message || 'Could not open the contract.');
+    }
+  };
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [reps, setReps] = useState<RepOption[]>([]);
   const isManager = user.role === 'admin' || user.role === 'manager';
@@ -269,14 +282,13 @@ export default function ShopDetails({ account, user, onSave }: Props) {
               <div className="text-xs text-navy-400 mb-2 font-medium">CHC Contract</div>
               <div className="flex flex-wrap items-center gap-4">
                 {account.contract_file_path && (
-                  <a
-                    href={account.contract_file_path}
-                    target="_blank"
-                    rel="noopener noreferrer"
+                  <button
+                    type="button"
+                    onClick={viewContract}
                     className="inline-flex items-center gap-1.5 text-sm text-brand-600 hover:text-brand-700 font-medium"
                   >
                     📄 View Contract
-                  </a>
+                  </button>
                 )}
                 {account.contract_expiration_date && (() => {
                   const exp = new Date(account.contract_expiration_date + 'T00:00:00');
@@ -458,9 +470,12 @@ export default function ShopDetails({ account, user, onSave }: Props) {
               />
               {uploading && <span className="text-xs text-navy-400">Uploading...</span>}
               {account.contract_file_path && (
-                <a href={account.contract_file_path} target="_blank" rel="noopener noreferrer" className="text-xs text-brand-600 hover:underline">
+                <button type="button" onClick={viewContract} className="text-xs text-brand-600 hover:underline">
                   View current
-                </a>
+                </button>
+              )}
+              {contractError && (
+                <span className="text-xs text-red-600">{contractError}</span>
               )}
             </div>
           </div>

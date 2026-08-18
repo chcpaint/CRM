@@ -1,7 +1,9 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { api } from '../services/api';
-import { User, Account, STATUS_LABELS, STATUS_COLORS, StatusType } from '../types';
+import InactivateModal from '../components/accounts/InactivateModal';
+import { User, Account, STATUS_LABELS, STATUS_COLORS, StatusType,
+         InactiveReason, INACTIVE_REASON_LABELS, isInactive } from '../types';
 
 interface Props { user: User }
 
@@ -30,8 +32,14 @@ export default function AccountsPage({ user }: Props) {
   const [reps, setReps] = useState<{ id: number; first_name: string; last_name: string }[]>([]);
   // Dormant filter
   const [dormantOnly, setDormantOnly] = useState(false);
-  // Show inactive toggle
+  // Archived ("inactive") accounts are hidden by default; this reveals them.
   const [showInactive, setShowInactive] = useState(false);
+  // Account queued for archiving, plus the reason being captured for it.
+  const [archiveTarget, setArchiveTarget] = useState<Account | null>(null);
+  const [archiveReason, setArchiveReason] = useState<InactiveReason | ''>('');
+  const [archiveNote, setArchiveNote] = useState('');
+  const [archiveSaving, setArchiveSaving] = useState(false);
+  const [archiveError, setArchiveError] = useState<string | null>(null);
 
   // Debounce timer ref for live search
   const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -77,9 +85,9 @@ export default function AccountsPage({ user }: Props) {
       };
       if (myAccountsOnlyRef.current) params.my_accounts = 'true';
       if (showInactiveRef.current) {
-        params.status = 'inactive';
-        params.include_inactive = 'true';
-      } else if (statusFilterRef.current) {
+        params.inactive_only = 'true';
+      }
+      if (statusFilterRef.current) {
         params.status = statusFilterRef.current;
       }
       if (branchFilterRef.current) params.branch = branchFilterRef.current;
@@ -184,13 +192,39 @@ export default function AccountsPage({ user }: Props) {
     return `${days}d ago`;
   };
 
-  const toggleActive = async (account: Account, e?: React.MouseEvent) => {
+  // Archiving asks for a reason first — the old one-click toggle failed
+  // silently and left no record of why a shop was dropped.
+  const openArchiveModal = (account: Account, e?: React.MouseEvent) => {
+    if (e) e.stopPropagation();
+    setArchiveTarget(account);
+    setArchiveReason('');
+    setArchiveNote('');
+    setArchiveError(null);
+  };
+
+  const confirmArchive = async () => {
+    if (!archiveTarget || !archiveReason) return;
+    setArchiveSaving(true);
+    setArchiveError(null);
+    try {
+      await api.post(`/accounts/${archiveTarget.id}/inactivate`,
+        { reason: archiveReason, note: archiveNote.trim() });
+      setArchiveTarget(null);
+      loadAccounts();
+    } catch (err: any) {
+      setArchiveError(err?.error || err?.message || 'Could not mark this account inactive.');
+    } finally {
+      setArchiveSaving(false);
+    }
+  };
+
+  const reactivate = async (account: Account, e?: React.MouseEvent) => {
     if (e) e.stopPropagation();
     try {
-      await api.patch(`/accounts/${account.id}/toggle-active`);
+      await api.post(`/accounts/${account.id}/reactivate`, {});
       loadAccounts();
-    } catch (err) {
-      console.error('Toggle failed:', err);
+    } catch (err: any) {
+      window.alert(err?.error || 'Could not reactivate this account.');
     }
   };
 
@@ -326,8 +360,8 @@ export default function AccountsPage({ user }: Props) {
           </div>
         </div>
         {/* Second row: quick-filter badges */}
-        {category === 'customer' && (
-          <div className="flex flex-wrap gap-2 mt-3 pt-3 border-t border-navy-100">
+        <div className="flex flex-wrap gap-2 mt-3 pt-3 border-t border-navy-100">
+          {category === 'customer' && (
             <button
               onClick={() => { setDormantOnly(!dormantOnly); setPage(1); }}
               className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold transition-all border ${
@@ -339,19 +373,20 @@ export default function AccountsPage({ user }: Props) {
               <span className="w-2 h-2 rounded-full bg-amber-500" />
               Dormant (30+ days)
             </button>
-            <button
-              onClick={() => { setShowInactive(!showInactive); setPage(1); }}
-              className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold transition-all border ${
-                showInactive
-                  ? 'bg-gray-200 text-gray-800 border-gray-400'
-                  : 'bg-white text-navy-500 border-navy-200 hover:bg-gray-100 hover:text-gray-700 hover:border-gray-300'
-              }`}
-            >
-              <span className="w-2 h-2 rounded-full bg-gray-400" />
-              Show Inactive
-            </button>
-          </div>
-        )}
+          )}
+          <button
+            onClick={() => { setShowInactive(!showInactive); setDormantOnly(false); setPage(1); }}
+            className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold transition-all border ${
+              showInactive
+                ? 'bg-gray-200 text-gray-800 border-gray-400'
+                : 'bg-white text-navy-500 border-navy-200 hover:bg-gray-100 hover:text-gray-700 hover:border-gray-300'
+            }`}
+            title="Accounts that have been parked. They stay out of lists and activity reporting; their sales history still reports."
+          >
+            <span className="w-2 h-2 rounded-full bg-gray-400" />
+            {showInactive ? 'Viewing inactive' : 'Show inactive'}
+          </button>
+        </div>
       </div>
 
       {/* Account list */}
@@ -388,16 +423,19 @@ export default function AccountsPage({ user }: Props) {
                     )}
                   </div>
                   <div className="flex flex-col items-end gap-1 flex-shrink-0">
-                    {category === 'lead' ? (
+                    {isInactive(account) ? (
+                      <span className="badge bg-gray-100 text-gray-600"
+                            title={account.inactive_reason ? INACTIVE_REASON_LABELS[account.inactive_reason] : undefined}>
+                        Inactive
+                      </span>
+                    ) : category === 'lead' ? (
                       <span className={`badge ${STATUS_COLORS[account.status]}`}>
                         {STATUS_LABELS[account.status]}
                       </span>
-                    ) : account.status === 'inactive' ? (
-                      <span className="badge bg-gray-100 text-gray-600">Inactive</span>
                     ) : (
                       <span className="badge badge-active">Customer</span>
                     )}
-                    {category === 'customer' && isDormant(account) && account.status !== 'inactive' && (
+                    {category === 'customer' && isDormant(account) && !isInactive(account) && (
                       <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-semibold bg-amber-100 text-amber-700 border border-amber-200">
                         Dormant &middot; {dormantDays(account)}
                       </span>
@@ -464,16 +502,21 @@ export default function AccountsPage({ user }: Props) {
                 )}
                 <div className="flex justify-between items-center text-xs mt-1.5">
                   <div>
-                    {category === 'customer' && (
+                    {isInactive(account) ? (
                       <button
-                        onClick={e => toggleActive(account, e)}
-                        className={`px-2 py-1 rounded text-[11px] font-medium transition-colors ${
-                          account.status === 'inactive'
-                            ? 'bg-green-50 text-green-700 border border-green-200 hover:bg-green-100'
-                            : 'bg-gray-50 text-gray-500 border border-gray-200 hover:bg-gray-100'
-                        }`}
+                        onClick={e => reactivate(account, e)}
+                        className="px-2 py-1 rounded text-[11px] font-medium transition-colors bg-green-50 text-green-700 border border-green-200 hover:bg-green-100"
+                        title="Put this account back on the active lists"
                       >
-                        {account.status === 'inactive' ? 'Reactivate' : 'Mark Inactive'}
+                        Reactivate
+                      </button>
+                    ) : (
+                      <button
+                        onClick={e => openArchiveModal(account, e)}
+                        className="px-2 py-1 rounded text-[11px] font-medium transition-colors bg-gray-50 text-gray-500 border border-gray-200 hover:bg-gray-100"
+                        title="Park this account: off the lists and out of activity reporting, sales history kept"
+                      >
+                        Mark Inactive
                       </button>
                     )}
                   </div>
@@ -520,16 +563,19 @@ export default function AccountsPage({ user }: Props) {
                     <td className="py-3 px-4 text-sm text-navy-500 hidden lg:table-cell">{account.paint_line || '-'}</td>
                     <td className="py-3 px-4">
                       <div className="flex flex-wrap gap-1">
-                        {category === 'lead' ? (
+                        {isInactive(account) ? (
+                          <span className="badge bg-gray-100 text-gray-600"
+                                title={account.inactive_reason ? INACTIVE_REASON_LABELS[account.inactive_reason] : undefined}>
+                            Inactive
+                          </span>
+                        ) : category === 'lead' ? (
                           <span className={`badge ${STATUS_COLORS[account.status]}`}>
                             {STATUS_LABELS[account.status]}
                           </span>
-                        ) : account.status === 'inactive' ? (
-                          <span className="badge bg-gray-100 text-gray-600">Inactive</span>
                         ) : (
                           <span className="badge badge-active">Active</span>
                         )}
-                        {category === 'customer' && isDormant(account) && account.status !== 'inactive' && (
+                        {category === 'customer' && isDormant(account) && !isInactive(account) && (
                           <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-semibold bg-amber-100 text-amber-700 border border-amber-200">
                             Dormant &middot; {dormantDays(account)}
                           </span>
@@ -553,17 +599,21 @@ export default function AccountsPage({ user }: Props) {
                             Email
                           </a>
                         )}
-                        {category === 'customer' && (
+                        {isInactive(account) ? (
                           <button
-                            onClick={() => toggleActive(account)}
-                            className={`ml-1 px-2 py-0.5 rounded text-[11px] font-medium transition-colors ${
-                              account.status === 'inactive'
-                                ? 'bg-green-50 text-green-700 border border-green-200 hover:bg-green-100'
-                                : 'bg-gray-50 text-gray-500 border border-gray-200 hover:bg-gray-100'
-                            }`}
-                            title={account.status === 'inactive' ? 'Reactivate this account' : 'Mark as inactive'}
+                            onClick={() => reactivate(account)}
+                            className="ml-1 px-2 py-0.5 rounded text-[11px] font-medium transition-colors bg-green-50 text-green-700 border border-green-200 hover:bg-green-100"
+                            title="Put this account back on the active lists"
                           >
-                            {account.status === 'inactive' ? 'Reactivate' : 'Inactive'}
+                            Reactivate
+                          </button>
+                        ) : (
+                          <button
+                            onClick={() => openArchiveModal(account)}
+                            className="ml-1 px-2 py-0.5 rounded text-[11px] font-medium transition-colors bg-gray-50 text-gray-500 border border-gray-200 hover:bg-gray-100"
+                            title="Park this account: off the lists and out of activity reporting, sales history kept"
+                          >
+                            Inactive
                           </button>
                         )}
                       </div>
@@ -605,6 +655,21 @@ export default function AccountsPage({ user }: Props) {
           category={category}
           onClose={() => setShowAddModal(false)}
           onCreated={() => { setShowAddModal(false); loadAccounts(); }}
+        />
+      )}
+
+      {/* ═══ MARK INACTIVE: capture the reason ═══ */}
+      {archiveTarget && (
+        <InactivateModal
+          shopName={archiveTarget.shop_name}
+          reason={archiveReason}
+          note={archiveNote}
+          saving={archiveSaving}
+          error={archiveError}
+          onReasonChange={setArchiveReason}
+          onNoteChange={setArchiveNote}
+          onCancel={() => setArchiveTarget(null)}
+          onConfirm={confirmArchive}
         />
       )}
     </div>

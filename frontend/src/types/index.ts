@@ -41,7 +41,16 @@ export interface Account {
   rep_last_name?: string;
   secondary_rep_first_name?: string;
   secondary_rep_last_name?: string;
-  status: 'prospect' | 'active' | 'cold' | 'dnc' | 'churned' | 'inactive';
+  status: 'prospect' | 'active' | 'cold' | 'dnc' | 'churned' | 'on_hold';
+  // Archiving ("inactive"). An archived account is retained in full but hidden
+  // from every operational list and excluded from activity reporting; its sales
+  // history keeps reporting. `inactive_at === null` means the account is live.
+  inactive_at: string | null;
+  inactive_by_id: number | null;
+  inactive_reason: InactiveReason | null;
+  inactive_note: string | null;
+  inactive_by_first_name?: string;
+  inactive_by_last_name?: string;
   suppliers: string | null;
   paint_line: string | null;
   allied_products: string | null;
@@ -138,7 +147,7 @@ export interface Pagination {
   totalPages?: number;
 }
 
-export type StatusType = 'prospect' | 'active' | 'cold' | 'dnc' | 'churned' | 'inactive';
+export type StatusType = 'prospect' | 'active' | 'cold' | 'dnc' | 'churned' | 'on_hold';
 
 export const STATUS_LABELS: Record<StatusType, string> = {
   prospect: 'Prospect',
@@ -146,7 +155,7 @@ export const STATUS_LABELS: Record<StatusType, string> = {
   cold: 'Cold',
   dnc: 'Do Not Contact',
   churned: 'Churned',
-  inactive: 'Inactive'
+  on_hold: 'On Hold'
 };
 
 export const STATUS_COLORS: Record<StatusType, string> = {
@@ -155,5 +164,23 @@ export const STATUS_COLORS: Record<StatusType, string> = {
   cold: 'badge-cold',
   dnc: 'badge-dnc',
   churned: 'badge-churned',
-  inactive: 'bg-gray-100 text-gray-600'
+  on_hold: 'bg-amber-100 text-amber-700'
 };
+
+// ─── Archiving ────────────────────────────────────────────────────────────
+// Why an account was parked. Kept in sync with INACTIVE_REASONS on the server.
+export type InactiveReason =
+  | 'closed' | 'competitor' | 'not_pursuing' | 'no_fit'
+  | 'unresponsive' | 'duplicate' | 'other';
+
+export const INACTIVE_REASON_LABELS: Record<InactiveReason, string> = {
+  closed:       'Shop closed / out of business',
+  competitor:   'Committed to a competitor',
+  not_pursuing: 'No longer pursuing',
+  no_fit:       'Not a fit for our products',
+  unresponsive: 'Unresponsive after repeated attempts',
+  duplicate:    'Duplicate of another account',
+  other:        'Other',
+};
+
+export const isInactive = (a: Pick<Account, 'inactive_at'>) => !!a.inactive_at;

@@ -91,12 +91,26 @@ ALTER TABLE accounts ADD COLUMN IF NOT EXISTS reactivated_by_id INTEGER REFERENC
 -- Backfill: any row the old toggle managed to set to status='inactive'
 -- becomes a properly archived row, and `status` is restored to a valid
 -- pipeline value so the constraint below and the PCR sync both behave.
-UPDATE accounts
-   SET inactive_at     = COALESCE(inactive_at, updated_at, NOW()),
-       inactive_reason = COALESCE(inactive_reason, 'not_pursuing'),
-       inactive_note   = COALESCE(inactive_note, 'Migrated from the previous inactive flag.'),
-       status          = CASE WHEN account_category = 'customer' THEN 'active' ELSE 'prospect' END
- WHERE status = 'inactive';
+--
+-- Guarded on account_category because that column is added further down this
+-- file: on a brand-new database it does not exist yet at this point. A new
+-- database also has no rows, so skipping the backfill there is correct.
+DO $backfill$
+BEGIN
+  IF EXISTS (SELECT 1 FROM information_schema.columns
+              WHERE table_schema = 'public'
+                AND table_name = 'accounts'
+                AND column_name = 'account_category') THEN
+    EXECUTE $q$
+      UPDATE accounts
+         SET inactive_at     = COALESCE(inactive_at, updated_at, NOW()),
+             inactive_reason = COALESCE(inactive_reason, 'not_pursuing'),
+             inactive_note   = COALESCE(inactive_note, 'Migrated from the previous inactive flag.'),
+             status          = CASE WHEN account_category = 'customer' THEN 'active' ELSE 'prospect' END
+       WHERE status = 'inactive'
+    $q$;
+  END IF;
+END $backfill$;
 
 -- Widen status constraint to include on_hold
 ALTER TABLE accounts DROP CONSTRAINT IF EXISTS accounts_status_check;

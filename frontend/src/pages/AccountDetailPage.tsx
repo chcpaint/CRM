@@ -27,6 +27,7 @@ export default function AccountDetailPage({ user }: Props) {
   const [archiveNote, setArchiveNote] = useState('');
   const [archiveSaving, setArchiveSaving] = useState(false);
   const [archiveError, setArchiveError] = useState<string | null>(null);
+  const [archiveNotice, setArchiveNotice] = useState<string | null>(null);
 
   const EMAIL_TYPES = ['', 'Painter', 'Admin', 'Manager', 'Owner'] as const;
 
@@ -299,6 +300,7 @@ export default function AccountDetailPage({ user }: Props) {
         { reason: archiveReason, note: archiveNote.trim() });
       setShowArchiveModal(false);
       setArchiveReason(''); setArchiveNote('');
+      setArchiveNotice(`${account.shop_name} is now inactive. It is off the lists and out of activity reporting; its sales history still reports.`);
       loadAccount();
     } catch (err: any) {
       setArchiveError(err?.error || err?.message || 'Could not mark this account inactive.');
@@ -311,6 +313,7 @@ export default function AccountDetailPage({ user }: Props) {
     if (!account) return;
     try {
       await api.post(`/accounts/${account.id}/reactivate`, {});
+      setArchiveNotice(`${account.shop_name} is active again and back on the lists.`);
       loadAccount();
     } catch (err: any) {
       window.alert(err?.error || 'Could not reactivate this account.');
@@ -561,6 +564,14 @@ export default function AccountDetailPage({ user }: Props) {
           </button>
         </div>
       </div>
+
+      {archiveNotice && (
+        <div className="mb-4 rounded-xl border border-green-200 bg-green-50 p-3 flex items-start gap-2">
+          <span className="text-green-600 leading-none">&#10003;</span>
+          <p className="text-sm text-green-800 flex-1">{archiveNotice}</p>
+          <button onClick={() => setArchiveNotice(null)} className="text-green-500 hover:text-green-700">&times;</button>
+        </div>
+      )}
 
       {/* ═══ INACTIVE BANNER ═══ */}
       {isInactive(account) && (

@@ -159,6 +159,13 @@ export default function AccountsPage({ user }: Props) {
   };
 
   const [autoLogToast, setAutoLogToast] = useState('');
+  const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const showToast = (message: string) => {
+    setAutoLogToast(message);
+    if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+    toastTimerRef.current = setTimeout(() => setAutoLogToast(''), 4000);
+  };
 
   // Auto-log: fires native action AND logs the activity
   const handleContactAction = async (e: React.MouseEvent, accountId: number, type: 'call' | 'sms' | 'email', href: string) => {
@@ -206,10 +213,12 @@ export default function AccountsPage({ user }: Props) {
     if (!archiveTarget || !archiveReason) return;
     setArchiveSaving(true);
     setArchiveError(null);
+    const name = archiveTarget.shop_name;
     try {
       await api.post(`/accounts/${archiveTarget.id}/inactivate`,
         { reason: archiveReason, note: archiveNote.trim() });
       setArchiveTarget(null);
+      showToast(`${name} is now inactive — find it under Show inactive`);
       loadAccounts();
     } catch (err: any) {
       setArchiveError(err?.error || err?.message || 'Could not mark this account inactive.');
@@ -222,6 +231,7 @@ export default function AccountsPage({ user }: Props) {
     if (e) e.stopPropagation();
     try {
       await api.post(`/accounts/${account.id}/reactivate`, {});
+      showToast(`${account.shop_name} is active again`);
       loadAccounts();
     } catch (err: any) {
       window.alert(err?.error || 'Could not reactivate this account.');

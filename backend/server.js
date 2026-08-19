@@ -1987,10 +1987,39 @@ async function startServer() {
   });
 
   // ─── FOLLOW-UP ROUTES ───
+  // ─── Follow-up permissions ───
+  // These three endpoints disagreed with each other, which is what stranded
+  // users with a reminder they could not clear: POST (schedule) had no check at
+  // all, while PATCH and DELETE required the caller to be the PRIMARY rep. So a
+  // follow-up could be created by anyone and then refused to whoever tried to
+  // clear it — and the UI swallowed the 403, so the button simply did nothing.
+  //
+  // One rule now applies to all three: managers and admins can always act; a rep
+  // can act when they are primary or secondary rep (matching GET and PUT
+  // /api/accounts/:id) or when nobody is assigned. Only someone else's account
+  // is refused, and the refusal says who to ask.
+  async function denyFollowUpChange(req, accountId) {
+    if (req.user.role !== 'rep') return null;
+    const acct = await queryOne(
+      `SELECT a.assigned_rep_id, a.secondary_rep_id, u.first_name, u.last_name
+         FROM accounts a LEFT JOIN users u ON a.assigned_rep_id = u.id
+        WHERE a.id = $1 AND a.deleted_at IS NULL`, [accountId]);
+    if (!acct) return { status: 404, body: { error: 'Account not found' } };
+    const uid = req.user.userId;
+    if (acct.assigned_rep_id === null && acct.secondary_rep_id === null) return null;
+    if (acct.assigned_rep_id === uid || acct.secondary_rep_id === uid) return null;
+    const owner = acct.first_name ? `${acct.first_name} ${acct.last_name}` : 'another rep';
+    return { status: 403, body: {
+      error: `This account is assigned to ${owner}, so its follow-up can only be changed by them or a manager.`
+    } };
+  }
+
   app.post('/api/accounts/:id/follow-up', authenticate, async (req, res) => {
     try {
       const { follow_up_date, follow_up_notes } = req.body;
       if (!follow_up_date) return res.status(400).json({ error: 'follow_up_date required' });
+      const denied = await denyFollowUpChange(req, req.params.id);
+      if (denied) return res.status(denied.status).json(denied.body);
 
       // Update account with follow-up date
       await execute('UPDATE accounts SET follow_up_date = $1, updated_at = NOW() WHERE id = $2', [follow_up_date, req.params.id]);
@@ -2005,20 +2034,15 @@ async function startServer() {
   });
 
   // ─── PATCH FOLLOW-UP (reschedule / update notes) ───
+
   app.patch('/api/accounts/:id/follow-up', authenticate, async (req, res) => {
     try {
       const accountId = req.params.id;
       const { follow_up_date, follow_up_notes } = req.body;
       if (!follow_up_date) return res.status(400).json({ error: 'follow_up_date required' });
 
-      // Reps can only update their own accounts; admins/managers can update any
-      if (req.user.role === 'rep') {
-        const acct = await queryOne('SELECT assigned_rep_id FROM accounts WHERE id=$1 AND deleted_at IS NULL', [accountId]);
-        if (!acct) return res.status(404).json({ error: 'Account not found' });
-        if (acct.assigned_rep_id !== req.user.userId) {
-          return res.status(403).json({ error: 'You can only update follow-ups on your own accounts' });
-        }
-      }
+      const denied = await denyFollowUpChange(req, accountId);
+      if (denied) return res.status(denied.status).json(denied.body);
 
       // Update the follow-up date on the account
       await execute('UPDATE accounts SET follow_up_date = $1, updated_at = NOW() WHERE id = $2', [follow_up_date, accountId]);
@@ -2036,14 +2060,8 @@ async function startServer() {
   app.delete('/api/accounts/:id/follow-up', authenticate, async (req, res) => {
     try {
       const accountId = req.params.id;
-      // Reps can only clear their own; admins/managers can clear any
-      if (req.user.role === 'rep') {
-        const acct = await queryOne('SELECT assigned_rep_id FROM accounts WHERE id=$1 AND deleted_at IS NULL', [accountId]);
-        if (!acct) return res.status(404).json({ error: 'Account not found' });
-        if (acct.assigned_rep_id !== req.user.userId) {
-          return res.status(403).json({ error: 'You can only clear follow-ups on your own accounts' });
-        }
-      }
+      const denied = await denyFollowUpChange(req, accountId);
+      if (denied) return res.status(denied.status).json(denied.body);
       await execute('UPDATE accounts SET follow_up_date = NULL, updated_at = NOW() WHERE id = $1', [accountId]);
       await execute('INSERT INTO notes (account_id, created_by_id, content) VALUES ($1, $2, $3)',
         [accountId, req.user.userId, '[Follow-up cleared]']);

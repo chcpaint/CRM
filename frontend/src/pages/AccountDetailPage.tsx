@@ -28,6 +28,7 @@ export default function AccountDetailPage({ user }: Props) {
   const [archiveSaving, setArchiveSaving] = useState(false);
   const [archiveError, setArchiveError] = useState<string | null>(null);
   const [archiveNotice, setArchiveNotice] = useState<string | null>(null);
+  const [followUpError, setFollowUpError] = useState<string | null>(null);
 
   const EMAIL_TYPES = ['', 'Painter', 'Admin', 'Manager', 'Owner'] as const;
 
@@ -436,9 +437,10 @@ export default function AccountDetailPage({ user }: Props) {
       setShowFollowUp(false);
       setFollowUpDate('');
       setFollowUpNotes('');
+      setFollowUpError(null);
       loadAccount();
-    } catch (err) {
-      console.error(err);
+    } catch (err: any) {
+      setFollowUpError(err?.error || err?.message || 'Could not save this follow-up.');
     } finally {
       setSavingFollowUp(false);
     }
@@ -1288,8 +1290,11 @@ export default function AccountDetailPage({ user }: Props) {
                       if (!confirm('Clear this follow-up?')) return;
                       try {
                         await api.delete(`/accounts/${id}/follow-up`);
+                        setFollowUpError(null);
                         loadAccount();
-                      } catch (err) { console.error(err); }
+                      } catch (err: any) {
+                        setFollowUpError(err?.error || err?.message || 'Could not clear this follow-up.');
+                      }
                     }}
                     className="text-xs text-navy-400 hover:text-red-500 transition"
                   >
@@ -1303,6 +1308,13 @@ export default function AccountDetailPage({ user }: Props) {
                 )}
               </div>
             </div>
+            {followUpError && (
+              <div className="bg-red-50 border border-red-200 rounded-lg p-3 mb-3 flex items-start gap-2">
+                <span className="text-red-500 leading-none">&#9888;</span>
+                <p className="text-sm text-red-700 flex-1">{followUpError}</p>
+                <button onClick={() => setFollowUpError(null)} className="text-red-400 hover:text-red-600">&times;</button>
+              </div>
+            )}
             {showFollowUp && (
               <div className="space-y-3">
                 <div className="flex flex-col sm:flex-row gap-2">

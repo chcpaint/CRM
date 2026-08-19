@@ -553,15 +553,18 @@ CREATE INDEX IF NOT EXISTS idx_accounts_inactive_at
 CREATE INDEX IF NOT EXISTS idx_accounts_live
   ON accounts(account_category, status) WHERE deleted_at IS NULL AND inactive_at IS NULL;
 
--- Audit-log actions used by archiving (and by CSV export, whose audit insert
--- was silently failing against the narrower original constraint).
+-- audit_log.action is no longer constrained to a whitelist.
+--
+-- It used to be, and re-asserting that whitelist on boot took the service down:
+-- ADD CONSTRAINT validates every existing row, and the audit log already held
+-- actions the list did not cover. The app writes well over a dozen distinct
+-- actions (assign, dismiss, duplicate_merge, manager_reply, refresh, restore,
+-- export_csv, inactivate, reactivate...) and gains more with every feature,
+-- while logAudit deliberately swallows its own errors — so a whitelist that
+-- falls behind silently drops audit records, and re-validating it at startup
+-- turns a stale list into an outage. An append-only audit trail should record
+-- whatever the application did.
 ALTER TABLE audit_log DROP CONSTRAINT IF EXISTS audit_log_action_check;
-DO $$ BEGIN
-  ALTER TABLE audit_log ADD CONSTRAINT audit_log_action_check
-    CHECK(action IN ('create','update','delete','import','login','logout',
-                     'export_csv','inactivate','reactivate','toggle_active'));
-EXCEPTION WHEN duplicate_object THEN NULL;
-END $$;
 
 -- ─── FIX SERIAL SEQUENCES ──────────────────────────────────────────
 -- After bulk imports, serial sequences can fall behind the actual max id,

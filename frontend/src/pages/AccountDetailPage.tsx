@@ -2,9 +2,11 @@ import { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { api } from '../services/api';
 import { openAuthedFile } from '../services/files';
-import { User, Account, Note, Activity, PhoneEntry, EmailEntry, STATUS_LABELS, STATUS_COLORS, StatusType } from '../types';
+import { User, Account, Note, Activity, PhoneEntry, EmailEntry, STATUS_LABELS, STATUS_COLORS, StatusType,
+         InactiveReason, INACTIVE_REASON_LABELS, isInactive } from '../types';
 import { useVoiceInput } from '../hooks/useVoiceInput';
 import ShopDetails from '../components/accounts/ShopDetails';
+import InactivateModal from '../components/accounts/InactivateModal';
 
 interface Props { user: User }
 
@@ -19,6 +21,13 @@ export default function AccountDetailPage({ user }: Props) {
   const [editForm, setEditForm] = useState<Partial<Account>>({});
   const [editPhones, setEditPhones] = useState<PhoneEntry[]>([]);
   const [editEmails, setEditEmails] = useState<EmailEntry[]>([]);
+  // Archiving ("inactive") — reason capture and restore.
+  const [showArchiveModal, setShowArchiveModal] = useState(false);
+  const [archiveReason, setArchiveReason] = useState<InactiveReason | ''>('');
+  const [archiveNote, setArchiveNote] = useState('');
+  const [archiveSaving, setArchiveSaving] = useState(false);
+  const [archiveError, setArchiveError] = useState<string | null>(null);
+  const [archiveNotice, setArchiveNotice] = useState<string | null>(null);
 
   const EMAIL_TYPES = ['', 'Painter', 'Admin', 'Manager', 'Owner'] as const;
 
@@ -280,6 +289,37 @@ export default function AccountDetailPage({ user }: Props) {
 
   useEffect(() => { loadAccount(); loadDocuments(); }, [id]);
 
+  // ─── Archiving ───
+  // Any user may park an account they are no longer pursuing. The reason is
+  // required, recorded against the account and mirrored into its notes.
+  const confirmArchive = async () => {
+    if (!account || !archiveReason) return;
+    setArchiveSaving(true); setArchiveError(null);
+    try {
+      await api.post(`/accounts/${account.id}/inactivate`,
+        { reason: archiveReason, note: archiveNote.trim() });
+      setShowArchiveModal(false);
+      setArchiveReason(''); setArchiveNote('');
+      setArchiveNotice(`${account.shop_name} is now inactive. It is off the lists and out of activity reporting; its sales history still reports.`);
+      loadAccount();
+    } catch (err: any) {
+      setArchiveError(err?.error || err?.message || 'Could not mark this account inactive.');
+    } finally {
+      setArchiveSaving(false);
+    }
+  };
+
+  const reactivateAccount = async () => {
+    if (!account) return;
+    try {
+      await api.post(`/accounts/${account.id}/reactivate`, {});
+      setArchiveNotice(`${account.shop_name} is active again and back on the lists.`);
+      loadAccount();
+    } catch (err: any) {
+      window.alert(err?.error || 'Could not reactivate this account.');
+    }
+  };
+
   const loadAccount = async () => {
     try {
       const data = await api.get(`/accounts/${id}`);
@@ -488,7 +528,9 @@ export default function AccountDetailPage({ user }: Props) {
           </button>
           <h1 className="text-xl sm:text-2xl font-bold text-navy-900">{account.shop_name}</h1>
           <div className="flex items-center gap-3 mt-2 flex-wrap">
-            {account.account_category === 'customer' ? (
+            {isInactive(account) ? (
+              <span className="badge bg-gray-100 text-gray-600">Inactive</span>
+            ) : account.account_category === 'customer' ? (
               <span className="badge badge-active">Active Customer</span>
             ) : (
               <span className={`badge ${STATUS_COLORS[account.status]}`}>{STATUS_LABELS[account.status]}</span>
@@ -504,10 +546,55 @@ export default function AccountDetailPage({ user }: Props) {
             {account.contact_names && <span className="text-sm text-navy-400">{account.contact_names}</span>}
           </div>
         </div>
-        <button onClick={() => { if (!editing && account) { setEditPhones(parsePhoneNumbers(account)); setEditEmails(parseEmailAddresses(account)); } setEditing(!editing); }} className="btn-ghost text-sm self-start">
-          {editing ? 'Cancel' : 'Edit'}
-        </button>
+        <div className="flex items-center gap-2 self-start">
+          {isInactive(account) ? (
+            <button onClick={reactivateAccount}
+                    className="text-sm px-3 py-2 rounded-xl font-medium bg-green-50 text-green-700 border border-green-200 hover:bg-green-100 transition-colors">
+              Reactivate
+            </button>
+          ) : (
+            <button onClick={() => { setArchiveReason(''); setArchiveNote(''); setArchiveError(null); setShowArchiveModal(true); }}
+                    className="text-sm px-3 py-2 rounded-xl font-medium bg-gray-50 text-gray-500 border border-gray-200 hover:bg-gray-100 transition-colors"
+                    title="Park this account: off the lists and out of activity reporting, sales history kept">
+              Mark Inactive
+            </button>
+          )}
+          <button onClick={() => { if (!editing && account) { setEditPhones(parsePhoneNumbers(account)); setEditEmails(parseEmailAddresses(account)); } setEditing(!editing); }} className="btn-ghost text-sm self-start">
+            {editing ? 'Cancel' : 'Edit'}
+          </button>
+        </div>
       </div>
+
+      {archiveNotice && (
+        <div className="mb-4 rounded-xl border border-green-200 bg-green-50 p-3 flex items-start gap-2">
+          <span className="text-green-600 leading-none">&#10003;</span>
+          <p className="text-sm text-green-800 flex-1">{archiveNotice}</p>
+          <button onClick={() => setArchiveNotice(null)} className="text-green-500 hover:text-green-700">&times;</button>
+        </div>
+      )}
+
+      {/* ═══ INACTIVE BANNER ═══ */}
+      {isInactive(account) && (
+        <div className="mb-4 sm:mb-6 rounded-xl border border-gray-300 bg-gray-50 p-4">
+          <div className="flex items-start gap-3">
+            <span className="text-gray-400 text-lg leading-none mt-0.5">&#9209;</span>
+            <div className="flex-1 min-w-0">
+              <p className="text-sm font-semibold text-navy-800">
+                This account is inactive
+                {account.inactive_reason && <> &mdash; {INACTIVE_REASON_LABELS[account.inactive_reason]}</>}
+              </p>
+              {account.inactive_note && (
+                <p className="text-sm text-navy-600 mt-1 break-words">{account.inactive_note}</p>
+              )}
+              <p className="text-xs text-navy-400 mt-1.5">
+                Marked{account.inactive_by_first_name ? ` by ${account.inactive_by_first_name} ${account.inactive_by_last_name || ''}` : ''}
+                {account.inactive_at ? ` on ${new Date(account.inactive_at).toLocaleDateString()}` : ''}.
+                It stays off the lists and out of activity reporting; its sales history still reports.
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ═══ CONTACT ACTION BAR ═══ */}
       {/* Tap to call/text/email — auto-logs the activity */}
@@ -1565,6 +1652,20 @@ export default function AccountDetailPage({ user }: Props) {
             </div>
           </div>
         </>
+      )}
+
+      {showArchiveModal && account && (
+        <InactivateModal
+          shopName={account.shop_name}
+          reason={archiveReason}
+          note={archiveNote}
+          saving={archiveSaving}
+          error={archiveError}
+          onReasonChange={setArchiveReason}
+          onNoteChange={setArchiveNote}
+          onCancel={() => setShowArchiveModal(false)}
+          onConfirm={confirmArchive}
+        />
       )}
     </div>
   );

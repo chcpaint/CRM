@@ -39,7 +39,8 @@ const accountUpdateSchema = z.object({
   account_type: z.enum(['collision', 'mechanical', 'dealership', 'restoration', 'other']).optional(),
   assigned_rep_id: intOrNull,
   secondary_rep_id: intOrNull,
-  status: z.enum(['prospect', 'active', 'cold', 'dnc', 'churned', 'on_hold', 'inactive']).optional(),
+  // 'inactive' is deliberately absent: archiving is done via /inactivate, not via status.
+  status: z.enum(['prospect', 'active', 'cold', 'dnc', 'churned', 'on_hold']).optional(),
   suppliers: shortStr(500).nullable().optional(),
   paint_line: shortStr(200).nullable().optional(),
   allied_products: shortStr(500).nullable().optional(),
@@ -272,7 +273,7 @@ function duplicateScore(a, b) {
 }
 
 async function findDuplicates(shopName, city, threshold = 0.85, excludeId) {
-  let sql = 'SELECT * FROM accounts WHERE deleted_at IS NULL';
+  let sql = 'SELECT * FROM accounts WHERE deleted_at IS NULL AND inactive_at IS NULL';
   const params = [];
   if (excludeId) { sql += ' AND id != $1'; params.push(excludeId); }
   const all = await queryAll(sql, params);
@@ -489,16 +490,17 @@ async function startServer() {
     try {
       const { status, assigned_rep_id, city, search, category, branch, my_accounts, page = '1', limit = '50' } = req.query;
       const pg = parseInt(page); const lim = parseInt(limit); const off = (pg-1)*lim;
-      const { include_inactive, dormant_only } = req.query;
+      const { include_inactive, inactive_only, dormant_only } = req.query;
       let where = ['a.deleted_at IS NULL']; let params = []; let idx = 1;
+      // Archived ("inactive") accounts are hidden unless explicitly asked for.
+      if (inactive_only === 'true') where.push('a.inactive_at IS NOT NULL');
+      else if (include_inactive !== 'true') where.push('a.inactive_at IS NULL');
       if (dormant_only === 'true') {
         where.push(`(a.last_contacted_at IS NULL OR a.last_contacted_at < NOW() - INTERVAL '30 days')`);
       }
       if (category) { where.push(`a.account_category = $${idx++}`); params.push(category); }
       if (branch) { where.push(`a.branch ILIKE $${idx++}`); params.push(`%${branch}%`); }
       if (status) { where.push(`a.status = $${idx++}`); params.push(status); }
-      // Exclude inactive accounts by default unless filter explicitly requests them
-      if (!status && include_inactive !== 'true') { where.push(`a.status != 'inactive'`); }
       // Filter to accounts where user is primary OR secondary rep
       if (my_accounts === 'true') {
         where.push(`(a.assigned_rep_id = $${idx} OR a.secondary_rep_id = $${idx+1})`);
@@ -513,7 +515,11 @@ async function startServer() {
       const joinClause = 'LEFT JOIN users u ON a.assigned_rep_id=u.id';
       const total = await queryOne(`SELECT COUNT(*) as total FROM accounts a ${joinClause} ${w}`, params);
       const accounts = await queryAll(
-        `SELECT a.*, u.first_name as rep_first_name, u.last_name as rep_last_name FROM accounts a ${joinClause} ${w} ORDER BY a.shop_name LIMIT $${idx++} OFFSET $${idx++}`,
+        `SELECT a.*, u.first_name as rep_first_name, u.last_name as rep_last_name,
+                iu.first_name as inactive_by_first_name, iu.last_name as inactive_by_last_name
+           FROM accounts a ${joinClause}
+           LEFT JOIN users iu ON a.inactive_by_id = iu.id
+         ${w} ORDER BY a.shop_name LIMIT $${idx++} OFFSET $${idx++}`,
         [...params, lim, off]);
       res.json({ accounts, pagination: { page: pg, limit: lim, total: parseInt(total?.total) || 0, totalPages: Math.ceil((parseInt(total?.total)||0)/lim) } });
     } catch (e) { res.status(500).json({ error: e.message }); }
@@ -525,28 +531,118 @@ async function startServer() {
       return res.status(403).json({ error: 'Admin or manager access required' });
     }
     await logAudit(req, 'account', 0, 'export_csv', { count: 'all' });
-    const accounts = await queryAll('SELECT a.*, u.first_name as rfn, u.last_name as rln FROM accounts a LEFT JOIN users u ON a.assigned_rep_id=u.id WHERE a.deleted_at IS NULL ORDER BY a.shop_name');
+    const archivedClause = req.query.include_inactive === 'true' ? '' : ' AND a.inactive_at IS NULL';
+    const accounts = await queryAll(`SELECT a.*, u.first_name as rfn, u.last_name as rln FROM accounts a LEFT JOIN users u ON a.assigned_rep_id=u.id WHERE a.deleted_at IS NULL${archivedClause} ORDER BY a.shop_name`);
     const hdr = 'Shop Name,City,Contact,Phone,Email,Status,Rep\n';
     const rows = accounts.map(a => `"${a.shop_name}","${a.city||''}","${a.contact_names||''}","${a.phone||''}","${a.email||''}","${a.status}","${a.rfn||''} ${a.rln||''}"`).join('\n');
     res.setHeader('Content-Type','text/csv'); res.setHeader('Content-Disposition','attachment; filename=accounts.csv');
     res.send(hdr + rows);
   });
 
-  // ─── TOGGLE ACCOUNT ACTIVE/INACTIVE ───
+  // ─── ARCHIVE (INACTIVATE) / REACTIVATE AN ACCOUNT ───
+  // An archived account is retained in full but removed from every operational
+  // list and from all activity reporting. Its sales history keeps reporting.
+  // Any authenticated user may archive or restore an account; every action is
+  // attributed in the audit log and mirrored into the account's notes.
+  const INACTIVE_REASONS = {
+    closed:        'Shop closed / out of business',
+    competitor:    'Committed to a competitor',
+    not_pursuing:  'No longer pursuing',
+    no_fit:        'Not a fit for our products',
+    unresponsive:  'Unresponsive after repeated attempts',
+    duplicate:     'Duplicate of another account',
+    other:         'Other',
+  };
+
+  app.get('/api/accounts/inactive-reasons', authenticate, (_req, res) => {
+    res.json({ reasons: Object.entries(INACTIVE_REASONS).map(([value, label]) => ({ value, label })) });
+  });
+
+  async function inactivateAccount(req, res) {
+    try {
+      const reason = String(req.body?.reason || '').trim();
+      const note = String(req.body?.note || '').trim().slice(0, 2000);
+      if (!INACTIVE_REASONS[reason]) {
+        return res.status(400).json({ error: 'A reason is required', validReasons: Object.keys(INACTIVE_REASONS) });
+      }
+      if (reason === 'other' && !note) {
+        return res.status(400).json({ error: 'Please add a short note explaining the reason.' });
+      }
+      const account = await queryOne(
+        'SELECT id, status, shop_name, inactive_at FROM accounts WHERE id=$1 AND deleted_at IS NULL', [req.params.id]);
+      if (!account) return res.status(404).json({ error: 'Not found' });
+      if (account.inactive_at) return res.status(409).json({ error: 'This account is already inactive.' });
+
+      await execute(
+        `UPDATE accounts
+            SET inactive_at = NOW(), inactive_by_id = $1, inactive_reason = $2, inactive_note = $3,
+                status_before_inactive = status, reactivated_at = NULL, reactivated_by_id = NULL,
+                follow_up_date = NULL, updated_at = NOW()
+          WHERE id = $4`,
+        [req.user.userId, reason, note || null, account.id]);
+
+      // Mirror the reason into the account's notes so the history stays readable
+      // in the one place reps already look.
+      const label = INACTIVE_REASONS[reason];
+      await execute(
+        'INSERT INTO notes (account_id, created_by_id, content) VALUES ($1, $2, $3)',
+        [account.id, req.user.userId, `Marked inactive — ${label}${note ? `: ${note}` : ''}`]);
+
+      await logAudit(req, 'account', account.id, 'inactivate',
+        { shop_name: account.shop_name, reason, note: note || null, status_before: account.status });
+      res.json({ success: true, inactive: true, reason, reason_label: label });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  }
+
+  async function reactivateAccount(req, res) {
+    try {
+      const account = await queryOne(
+        'SELECT id, shop_name, inactive_at, inactive_reason, status_before_inactive, account_category FROM accounts WHERE id=$1 AND deleted_at IS NULL',
+        [req.params.id]);
+      if (!account) return res.status(404).json({ error: 'Not found' });
+      if (!account.inactive_at) return res.status(409).json({ error: 'This account is already active.' });
+
+      // Restore the pipeline status the account held before it was archived.
+      // Fall back on the category default if it predates the archiving columns.
+      const restored = account.status_before_inactive
+        || (account.account_category === 'customer' ? 'active' : 'prospect');
+
+      await execute(
+        `UPDATE accounts
+            SET inactive_at = NULL, inactive_by_id = NULL, inactive_reason = NULL, inactive_note = NULL,
+                status_before_inactive = NULL, reactivated_at = NOW(), reactivated_by_id = $1,
+                status = $2, updated_at = NOW()
+          WHERE id = $3`,
+        [req.user.userId, restored, account.id]);
+
+      await execute(
+        'INSERT INTO notes (account_id, created_by_id, content) VALUES ($1, $2, $3)',
+        [account.id, req.user.userId, 'Reactivated — back on the active lists.']);
+
+      await logAudit(req, 'account', account.id, 'reactivate',
+        { shop_name: account.shop_name, was_reason: account.inactive_reason, status_restored: restored });
+      res.json({ success: true, inactive: false, status: restored });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  }
+
+  app.post('/api/accounts/:id/inactivate', authenticate, inactivateAccount);
+  app.post('/api/accounts/:id/reactivate', authenticate, reactivateAccount);
+
+  // Compatibility shim for PWA clients still running the previous bundle.
+  // The old endpoint could not carry a reason, so it records the generic one.
   app.patch('/api/accounts/:id/toggle-active', authenticate, async (req, res) => {
     try {
-      const account = await queryOne('SELECT id, status, shop_name FROM accounts WHERE id=$1 AND deleted_at IS NULL', [req.params.id]);
+      const account = await queryOne('SELECT id, inactive_at FROM accounts WHERE id=$1 AND deleted_at IS NULL', [req.params.id]);
       if (!account) return res.status(404).json({ error: 'Not found' });
-      const newStatus = account.status === 'inactive' ? 'active' : 'inactive';
-      await queryOne('UPDATE accounts SET status=$1, updated_at=NOW() WHERE id=$2 RETURNING *', [newStatus, req.params.id]);
-      await logAudit(req, 'account', account.id, 'toggle_active', { from: account.status, to: newStatus });
-      res.json({ success: true, newStatus });
+      if (account.inactive_at) return reactivateAccount(req, res);
+      req.body = { reason: 'not_pursuing', note: 'Marked from an older app version — reason not captured.' };
+      return inactivateAccount(req, res);
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
 
   app.get('/api/accounts/:id', authenticate, async (req, res) => {
     try {
-      const account = await queryOne('SELECT a.*, u.first_name as rep_first_name, u.last_name as rep_last_name, u2.first_name as secondary_rep_first_name, u2.last_name as secondary_rep_last_name FROM accounts a LEFT JOIN users u ON a.assigned_rep_id=u.id LEFT JOIN users u2 ON a.secondary_rep_id=u2.id WHERE a.id=$1 AND a.deleted_at IS NULL', [req.params.id]);
+      const account = await queryOne('SELECT a.*, u.first_name as rep_first_name, u.last_name as rep_last_name, u2.first_name as secondary_rep_first_name, u2.last_name as secondary_rep_last_name, iu.first_name as inactive_by_first_name, iu.last_name as inactive_by_last_name FROM accounts a LEFT JOIN users u ON a.assigned_rep_id=u.id LEFT JOIN users u2 ON a.secondary_rep_id=u2.id LEFT JOIN users iu ON a.inactive_by_id=iu.id WHERE a.id=$1 AND a.deleted_at IS NULL', [req.params.id]);
       if (!account) return res.status(404).json({ error: 'Not found' });
       // Reps can only view accounts they are assigned to (primary or secondary).
       // Managers and admins see everything.
@@ -953,7 +1049,7 @@ async function startServer() {
   app.get('/api/activities/reminders', authenticate, async (req, res) => {
     const days = parseInt(req.query.days) || 14;
     const isRep = req.user.role === 'rep';
-    let sql = `SELECT a.*, u.first_name as rep_first_name, u.last_name as rep_last_name FROM accounts a LEFT JOIN users u ON a.assigned_rep_id=u.id WHERE a.deleted_at IS NULL AND a.status IN ('prospect','active') AND (a.last_contacted_at IS NULL OR a.last_contacted_at < NOW() - ($1 || ' days')::INTERVAL)`;
+    let sql = `SELECT a.*, u.first_name as rep_first_name, u.last_name as rep_last_name FROM accounts a LEFT JOIN users u ON a.assigned_rep_id=u.id WHERE a.inactive_at IS NULL AND a.deleted_at IS NULL AND a.status IN ('prospect','active') AND (a.last_contacted_at IS NULL OR a.last_contacted_at < NOW() - ($1 || ' days')::INTERVAL)`;
     const params = [days];
     if (isRep) { sql += ' AND a.assigned_rep_id = $2'; params.push(req.user.userId); }
     sql += ' ORDER BY a.last_contacted_at ASC NULLS FIRST LIMIT 50';
@@ -1238,8 +1334,8 @@ async function startServer() {
 
       const statusCounts = await queryAll(
         isRep
-          ? 'SELECT status, COUNT(*) as count FROM accounts WHERE deleted_at IS NULL AND assigned_rep_id = $1 GROUP BY status'
-          : 'SELECT status, COUNT(*) as count FROM accounts WHERE deleted_at IS NULL GROUP BY status',
+          ? 'SELECT status, COUNT(*) as count FROM accounts WHERE deleted_at IS NULL AND inactive_at IS NULL AND assigned_rep_id = $1 GROUP BY status'
+          : 'SELECT status, COUNT(*) as count FROM accounts WHERE deleted_at IS NULL AND inactive_at IS NULL GROUP BY status',
         isRep ? [uid] : []);
 
       // Revenue uses branch_daily_revenue (post-discount invoice totals from intranet)
@@ -1347,33 +1443,35 @@ async function startServer() {
                FROM activities act
                JOIN accounts a ON act.account_id=a.id
                JOIN users u ON act.rep_id=u.id
-              WHERE act.rep_id=$1)
+              WHERE act.rep_id=$1 AND a.inactive_at IS NULL)
              UNION ALL
              (SELECT n.id, n.account_id, 'note' AS entry_type, NULL AS activity_type, n.content AS description, n.created_at,
                     a.shop_name, u.first_name, u.last_name
                FROM notes n
                JOIN accounts a ON n.account_id=a.id
                JOIN users u ON n.created_by_id=u.id
-              WHERE n.created_by_id=$1)
+              WHERE n.created_by_id=$1 AND a.inactive_at IS NULL)
              ORDER BY created_at DESC LIMIT 100`
           : `(SELECT act.id, act.account_id, 'activity' AS entry_type, act.activity_type, act.description, act.created_at,
                     a.shop_name, u.first_name, u.last_name
                FROM activities act
                JOIN accounts a ON act.account_id=a.id
-               JOIN users u ON act.rep_id=u.id)
+               JOIN users u ON act.rep_id=u.id
+              WHERE a.inactive_at IS NULL)
              UNION ALL
              (SELECT n.id, n.account_id, 'note' AS entry_type, NULL AS activity_type, n.content AS description, n.created_at,
                     a.shop_name, u.first_name, u.last_name
                FROM notes n
                JOIN accounts a ON n.account_id=a.id
-               JOIN users u ON n.created_by_id=u.id)
+               JOIN users u ON n.created_by_id=u.id
+              WHERE a.inactive_at IS NULL)
              ORDER BY created_at DESC LIMIT 100`,
         isRep ? [uid] : []);
 
       const dormantCount = await queryOne(
         isRep
-          ? "SELECT COUNT(*) as count FROM accounts WHERE deleted_at IS NULL AND status = 'active' AND (last_contacted_at IS NULL OR last_contacted_at < NOW() - INTERVAL '30 days') AND assigned_rep_id = $1"
-          : "SELECT COUNT(*) as count FROM accounts WHERE deleted_at IS NULL AND status = 'active' AND (last_contacted_at IS NULL OR last_contacted_at < NOW() - INTERVAL '30 days')",
+          ? "SELECT COUNT(*) as count FROM accounts WHERE deleted_at IS NULL AND inactive_at IS NULL AND status = 'active' AND (last_contacted_at IS NULL OR last_contacted_at < NOW() - INTERVAL '30 days') AND assigned_rep_id = $1"
+          : "SELECT COUNT(*) as count FROM accounts WHERE deleted_at IS NULL AND inactive_at IS NULL AND status = 'active' AND (last_contacted_at IS NULL OR last_contacted_at < NOW() - INTERVAL '30 days')",
         isRep ? [uid] : []);
 
       // Active buyers: distinct customers with purchases in the last 6 months
@@ -1389,8 +1487,8 @@ async function startServer() {
       // Total customers in system (account_category = 'customer', not deleted, not inactive)
       const customersInSystem = await queryOne(
         isRep
-          ? "SELECT COUNT(*) as count FROM accounts WHERE deleted_at IS NULL AND account_category = 'customer' AND status != 'inactive' AND assigned_rep_id = $1"
-          : "SELECT COUNT(*) as count FROM accounts WHERE deleted_at IS NULL AND account_category = 'customer' AND status != 'inactive'",
+          ? "SELECT COUNT(*) as count FROM accounts WHERE deleted_at IS NULL AND inactive_at IS NULL AND account_category = 'customer' AND assigned_rep_id = $1"
+          : "SELECT COUNT(*) as count FROM accounts WHERE deleted_at IS NULL AND inactive_at IS NULL AND account_category = 'customer'",
         isRep ? [uid] : []);
 
       res.json({
@@ -1430,7 +1528,7 @@ async function startServer() {
 
       if (q.includes('notes') || q.includes('note')) {
         const ns = q.replace(/notes?|on|about|for|show|me|find|get|what/gi, '').trim();
-        const results = await queryAll('SELECT n.*, a.shop_name, u.first_name, u.last_name FROM notes n JOIN accounts a ON n.account_id=a.id JOIN users u ON n.created_by_id=u.id WHERE a.shop_name ILIKE $1 OR n.content ILIKE $2 ORDER BY n.created_at DESC LIMIT 20',
+        const results = await queryAll('SELECT n.*, a.shop_name, u.first_name, u.last_name FROM notes n JOIN accounts a ON n.account_id=a.id JOIN users u ON n.created_by_id=u.id WHERE a.inactive_at IS NULL AND a.shop_name ILIKE $1 OR n.content ILIKE $2 ORDER BY n.created_at DESC LIMIT 20',
           [`%${ns}%`, `%${ns}%`]);
         return res.json({ type: 'notes', results, query: q });
       }
@@ -1440,7 +1538,7 @@ async function startServer() {
         if (terms) { where.push(`(a.shop_name ILIKE $${idx} OR a.contact_names ILIKE $${idx+1} OR a.city ILIKE $${idx+2})`); const t = `%${terms}%`; params.push(t,t,t); idx += 3; }
       }
 
-      const results = await queryAll(`SELECT a.*, u.first_name as rep_first_name, u.last_name as rep_last_name FROM accounts a LEFT JOIN users u ON a.assigned_rep_id=u.id WHERE ${where.join(' AND ')} ORDER BY a.shop_name LIMIT 50`, params);
+      const results = await queryAll(`SELECT a.*, u.first_name as rep_first_name, u.last_name as rep_last_name FROM accounts a LEFT JOIN users u ON a.assigned_rep_id=u.id WHERE a.inactive_at IS NULL AND ${where.join(' AND ')} ORDER BY a.shop_name LIMIT 50`, params);
 
       // If no account results found, also search sales_data for customer names
       // This catches customers like "Universal Auto" that exist in sales imports but not as accounts
@@ -1533,7 +1631,7 @@ async function startServer() {
       `SELECT a.*, (
         SELECT n.content FROM notes n WHERE n.account_id = a.id AND n.content LIKE '[Follow-up%' ORDER BY n.created_at DESC LIMIT 1
       ) as follow_up_note
-      FROM accounts a WHERE a.deleted_at IS NULL AND a.assigned_rep_id = $1 AND a.follow_up_date IS NOT NULL AND a.follow_up_date <= CURRENT_DATE ORDER BY a.follow_up_date ASC`,
+      FROM accounts a WHERE a.deleted_at IS NULL AND a.inactive_at IS NULL AND a.assigned_rep_id = $1 AND a.follow_up_date IS NOT NULL AND a.follow_up_date <= CURRENT_DATE ORDER BY a.follow_up_date ASC`,
       [userId]
     );
 
@@ -1542,19 +1640,19 @@ async function startServer() {
       `SELECT a.*, (
         SELECT n.content FROM notes n WHERE n.account_id = a.id AND n.content LIKE '[Follow-up%' ORDER BY n.created_at DESC LIMIT 1
       ) as follow_up_note
-      FROM accounts a WHERE a.deleted_at IS NULL AND a.assigned_rep_id = $1 AND a.follow_up_date IS NOT NULL AND a.follow_up_date > CURRENT_DATE AND a.follow_up_date <= CURRENT_DATE + INTERVAL '7 days' ORDER BY a.follow_up_date ASC`,
+      FROM accounts a WHERE a.deleted_at IS NULL AND a.inactive_at IS NULL AND a.assigned_rep_id = $1 AND a.follow_up_date IS NOT NULL AND a.follow_up_date > CURRENT_DATE AND a.follow_up_date <= CURRENT_DATE + INTERVAL '7 days' ORDER BY a.follow_up_date ASC`,
       [userId]
     );
 
     // Get dormant accounts (no contact in 14+ days)
     const dormantAccounts = await queryAll(
-      "SELECT a.* FROM accounts a WHERE a.deleted_at IS NULL AND a.assigned_rep_id = $1 AND a.status = 'active' AND (a.last_contacted_at IS NULL OR a.last_contacted_at < NOW() - INTERVAL '30 days') ORDER BY a.last_contacted_at ASC NULLS FIRST LIMIT 10",
+      "SELECT a.* FROM accounts a WHERE a.deleted_at IS NULL AND a.inactive_at IS NULL AND a.assigned_rep_id = $1 AND a.status = 'active' AND (a.last_contacted_at IS NULL OR a.last_contacted_at < NOW() - INTERVAL '30 days') ORDER BY a.last_contacted_at ASC NULLS FIRST LIMIT 10",
       [userId]
     );
 
     // Get new notes from other team members in last 24 hours
     const newNotes = await queryAll(
-      'SELECT n.*, a.shop_name, u.first_name, u.last_name FROM notes n JOIN accounts a ON n.account_id = a.id JOIN users u ON n.created_by_id = u.id WHERE a.assigned_rep_id = $1 AND n.created_by_id != $1 AND n.created_at > NOW() - INTERVAL \'30 days\' ORDER BY n.created_at DESC LIMIT 100',
+      'SELECT n.*, a.shop_name, u.first_name, u.last_name FROM notes n JOIN accounts a ON n.account_id = a.id JOIN users u ON n.created_by_id = u.id WHERE a.inactive_at IS NULL AND a.assigned_rep_id = $1 AND n.created_by_id != $1 AND n.created_at > NOW() - INTERVAL \'30 days\' ORDER BY n.created_at DESC LIMIT 100',
       [userId]
     );
 
@@ -1962,14 +2060,14 @@ async function startServer() {
 
       // Find account by name (case-insensitive, partial match)
       let account = await queryOne(
-        'SELECT id, shop_name FROM accounts WHERE LOWER(shop_name) = LOWER($1) AND deleted_at IS NULL',
+        'SELECT id, shop_name FROM accounts WHERE LOWER(shop_name) = LOWER($1) AND deleted_at IS NULL AND inactive_at IS NULL',
         [account_name.trim()]
       );
 
       // If no exact match, try ILIKE partial match
       if (!account) {
         account = await queryOne(
-          'SELECT id, shop_name FROM accounts WHERE shop_name ILIKE $1 AND deleted_at IS NULL ORDER BY shop_name LIMIT 1',
+          'SELECT id, shop_name FROM accounts WHERE shop_name ILIKE $1 AND deleted_at IS NULL AND inactive_at IS NULL ORDER BY shop_name LIMIT 1',
           [`%${account_name.trim()}%`]
         );
       }
@@ -1992,11 +2090,14 @@ async function startServer() {
   app.get('/api/follow-ups', authenticate, async (req, res) => {
     try {
       const isRep = req.user.role === 'rep';
-      let sql = 'SELECT a.*, u.first_name as rep_first_name, u.last_name as rep_last_name FROM accounts a LEFT JOIN users u ON a.assigned_rep_id=u.id WHERE a.deleted_at IS NULL AND a.follow_up_date IS NOT NULL AND a.follow_up_date >= CURRENT_DATE';
-      const params = [];
+      // follow_up_date is a TEXT column (YYYY-MM-DD), so compare as strings —
+      // comparing it against CURRENT_DATE raises a type error. See af32a97.
+      const today = new Date().toISOString().slice(0, 10);
+      let sql = 'SELECT a.*, u.first_name as rep_first_name, u.last_name as rep_last_name FROM accounts a LEFT JOIN users u ON a.assigned_rep_id=u.id WHERE a.inactive_at IS NULL AND a.deleted_at IS NULL AND a.follow_up_date IS NOT NULL AND a.follow_up_date >= $1';
+      const params = [today];
 
       if (isRep) {
-        sql += ' AND a.assigned_rep_id = $1';
+        sql += ' AND a.assigned_rep_id = $2';
         params.push(req.user.userId);
       }
 
@@ -2009,11 +2110,13 @@ async function startServer() {
   app.get('/api/follow-ups/overdue', authenticate, async (req, res) => {
     try {
       const isRep = req.user.role === 'rep';
-      let sql = 'SELECT a.*, u.first_name as rep_first_name, u.last_name as rep_last_name FROM accounts a LEFT JOIN users u ON a.assigned_rep_id=u.id WHERE a.deleted_at IS NULL AND a.follow_up_date IS NOT NULL AND a.follow_up_date < CURRENT_DATE';
-      const params = [];
+      // Same TEXT-column caveat as /api/follow-ups above.
+      const today = new Date().toISOString().slice(0, 10);
+      let sql = 'SELECT a.*, u.first_name as rep_first_name, u.last_name as rep_last_name FROM accounts a LEFT JOIN users u ON a.assigned_rep_id=u.id WHERE a.inactive_at IS NULL AND a.deleted_at IS NULL AND a.follow_up_date IS NOT NULL AND a.follow_up_date < $1';
+      const params = [today];
 
       if (isRep) {
-        sql += ' AND a.assigned_rep_id = $1';
+        sql += ' AND a.assigned_rep_id = $2';
         params.push(req.user.userId);
       }
 
@@ -2351,7 +2454,7 @@ async function startServer() {
       const unassigned = await queryAll(`
         SELECT a.id, a.shop_name, a.account_category
         FROM accounts a
-        WHERE a.assigned_rep_id IS NULL AND a.deleted_at IS NULL
+        WHERE a.assigned_rep_id IS NULL AND a.deleted_at IS NULL AND a.inactive_at IS NULL
       `);
 
       // 6. For each account, find salesperson from seed data or sales data
@@ -2778,7 +2881,7 @@ async function startServer() {
       ),
       queryOne(
         `SELECT COUNT(*) AS cnt FROM accounts
-         WHERE assigned_rep_id = $1 AND created_at >= $2 AND created_at < ($3::date + INTERVAL '1 day') AND deleted_at IS NULL`,
+         WHERE assigned_rep_id = $1 AND created_at >= $2 AND created_at < ($3::date + INTERVAL '1 day') AND deleted_at IS NULL AND inactive_at IS NULL`,
         [repId, mondayStr, sundayStr]
       ),
       queryOne(
@@ -2789,7 +2892,7 @@ async function startServer() {
       // Follow-ups planned for NEXT week (text column — compare as strings)
       queryOne(
         `SELECT COUNT(*) AS cnt FROM accounts
-         WHERE assigned_rep_id = $1 AND deleted_at IS NULL
+         WHERE assigned_rep_id = $1 AND deleted_at IS NULL AND inactive_at IS NULL
            AND follow_up_date IS NOT NULL
            AND follow_up_date >= $2 AND follow_up_date <= $3`,
         [repId, nextMondayStr, nextSundayStr]
@@ -2801,7 +2904,7 @@ async function startServer() {
       ),
       queryOne(
         `SELECT COUNT(*) AS cnt FROM accounts
-         WHERE assigned_rep_id = $1 AND status = 'active' AND deleted_at IS NULL
+         WHERE assigned_rep_id = $1 AND status = 'active' AND deleted_at IS NULL AND inactive_at IS NULL
            AND (last_contacted_at IS NULL OR last_contacted_at < NOW() - INTERVAL '30 days')`,
         [repId]
       ),
@@ -3080,7 +3183,7 @@ async function startServer() {
       const accountsTouched = await queryAll(
         `SELECT a.shop_name, COUNT(*) AS activity_count
          FROM activities act
-         JOIN accounts a ON a.id = act.account_id
+         JOIN accounts a ON a.id = act.account_id AND a.inactive_at IS NULL
          WHERE act.rep_id = $1 AND act.created_at >= $2 AND act.created_at < ($3::date + INTERVAL '1 day')
          GROUP BY a.shop_name
          ORDER BY activity_count DESC
@@ -3098,7 +3201,7 @@ async function startServer() {
       const upcomingFollowUps = await queryAll(
         `SELECT a.shop_name, a.follow_up_date
          FROM accounts a
-         WHERE a.assigned_rep_id = $1 AND a.deleted_at IS NULL
+         WHERE a.assigned_rep_id = $1 AND a.deleted_at IS NULL AND a.inactive_at IS NULL
            AND a.follow_up_date IS NOT NULL
            AND a.follow_up_date >= $2 AND a.follow_up_date <= $3
          ORDER BY a.follow_up_date ASC`,
@@ -3142,7 +3245,7 @@ async function startServer() {
       const scheduledActivities = await queryAll(
         `SELECT act.activity_type, act.description, act.scheduled_date, a.shop_name
          FROM activities act
-         JOIN accounts a ON a.id = act.account_id
+         JOIN accounts a ON a.id = act.account_id AND a.inactive_at IS NULL
          WHERE act.rep_id = $1 AND act.completed_date IS NULL
            AND act.scheduled_date >= $2::date AND act.scheduled_date < ($3::date + INTERVAL '1 day')
          ORDER BY act.scheduled_date ASC`,
@@ -3819,14 +3922,23 @@ async function startServer() {
           const pcrId = normalizeKey(shop.shop_name);
           // Match by pcr_customer_id first (stable even if name changed), then by name
           let existing = await queryOne(
-            'SELECT id, account_category, status, pcr_managed FROM accounts WHERE pcr_customer_id = $1 AND deleted_at IS NULL',
+            'SELECT id, account_category, status, pcr_managed, inactive_at FROM accounts WHERE pcr_customer_id = $1 AND deleted_at IS NULL',
             [pcrId]
           );
           if (!existing) {
             existing = await queryOne(
-              'SELECT id, account_category, status, pcr_managed FROM accounts WHERE LOWER(shop_name) = LOWER($1) AND deleted_at IS NULL',
+              'SELECT id, account_category, status, pcr_managed, inactive_at FROM accounts WHERE LOWER(shop_name) = LOWER($1) AND deleted_at IS NULL',
               [shop.shop_name]
             );
+          }
+          if (existing && existing.inactive_at) {
+            // The shop is archived by a human. PCR still lists it, but we respect
+            // the decision: refresh the sync stamp only and leave it off the lists.
+            await execute(
+              'UPDATE accounts SET pcr_managed = true, pcr_shop_name = $1, pcr_customer_id = $2, pcr_last_synced_at = NOW() WHERE id = $3',
+              [shop.shop_name, pcrId, existing.id]);
+            skipped++;
+            continue;
           }
           if (existing) {
             // Merge PCR metadata into CRM record. Never overwrite CRM user-entered fields —
@@ -3869,7 +3981,7 @@ async function startServer() {
       // But only if they were originally PCR-managed
       const pcrNames = pcrShops.map(s => s.shop_name.toLowerCase());
       const currentPCRCustomers = await queryAll(
-        "SELECT id, shop_name FROM accounts WHERE pcr_managed = true AND account_category = 'customer' AND status = 'active' AND deleted_at IS NULL"
+        "SELECT id, shop_name FROM accounts WHERE pcr_managed = true AND account_category = 'customer' AND status = 'active' AND deleted_at IS NULL AND inactive_at IS NULL"
       );
       let churned = 0;
       for (const cust of currentPCRCustomers) {
@@ -4344,14 +4456,14 @@ async function startServer() {
 
       // Find matching active customer account (PCR-imported)
       let match = await queryOne(
-        "SELECT id, shop_name, branch, account_category, pcr_managed FROM accounts WHERE LOWER(shop_name) = LOWER($1) AND account_category = 'customer' AND deleted_at IS NULL AND id != $2",
+        "SELECT id, shop_name, branch, account_category, pcr_managed FROM accounts WHERE LOWER(shop_name) = LOWER($1) AND account_category = 'customer' AND deleted_at IS NULL AND inactive_at IS NULL AND id != $2",
         [account.shop_name, account.id]
       );
 
       // If no exact match, try PCR shop name
       if (!match) {
         match = await queryOne(
-          "SELECT id, shop_name, branch, account_category, pcr_managed FROM accounts WHERE LOWER(pcr_shop_name) = LOWER($1) AND account_category = 'customer' AND deleted_at IS NULL AND id != $2",
+          "SELECT id, shop_name, branch, account_category, pcr_managed FROM accounts WHERE LOWER(pcr_shop_name) = LOWER($1) AND account_category = 'customer' AND deleted_at IS NULL AND inactive_at IS NULL AND id != $2",
           [account.shop_name, account.id]
         );
       }
@@ -4443,11 +4555,11 @@ async function startServer() {
       const scanMode = req.body.mode || 'all'; // 'lead_vs_active', 'active_vs_active', 'all'
       // Get all leads
       const leads = await queryAll(
-        "SELECT id, shop_name, city, phone, email, contact_names, account_category FROM accounts WHERE account_category = 'lead' AND deleted_at IS NULL ORDER BY shop_name"
+        "SELECT id, shop_name, city, phone, email, contact_names, account_category FROM accounts WHERE account_category = 'lead' AND deleted_at IS NULL AND inactive_at IS NULL ORDER BY shop_name"
       );
       // Get all active customers
       const actives = await queryAll(
-        "SELECT id, shop_name, city, phone, email, contact_names, pcr_managed, branch, account_category FROM accounts WHERE account_category = 'customer' AND deleted_at IS NULL ORDER BY shop_name"
+        "SELECT id, shop_name, city, phone, email, contact_names, pcr_managed, branch, account_category FROM accounts WHERE account_category = 'customer' AND deleted_at IS NULL AND inactive_at IS NULL ORDER BY shop_name"
       );
       const duplicates = [];
       const seen = new Set(); // prevent duplicate flag pairs
@@ -4559,6 +4671,7 @@ async function startServer() {
         JOIN accounts a1 ON df.account_1_id = a1.id
         JOIN accounts a2 ON df.account_2_id = a2.id
         WHERE df.status = 'pending' AND a1.deleted_at IS NULL AND a2.deleted_at IS NULL
+          AND a1.inactive_at IS NULL AND a2.inactive_at IS NULL
         ORDER BY df.similarity_score DESC, df.created_at DESC
       `);
       res.json({ duplicates: flags });
@@ -4894,7 +5007,7 @@ async function startServer() {
           SELECT a.assigned_rep_id, COUNT(*) as followup_count
           FROM accounts a
           WHERE a.follow_up_date >= $1::date AND a.follow_up_date <= $2::date
-            AND a.deleted_at IS NULL
+            AND a.deleted_at IS NULL AND a.inactive_at IS NULL
           GROUP BY a.assigned_rep_id
         ) fc ON fc.assigned_rep_id = u.id
         WHERE u.is_active = true AND u.role = 'rep'
@@ -4919,7 +5032,7 @@ async function startServer() {
             WHERE r.content LIKE '[Manager Reply to #' || n.id || ']%'
             ) as replies
           FROM notes n
-          JOIN accounts a ON a.id = n.account_id
+          JOIN accounts a ON a.id = n.account_id AND a.inactive_at IS NULL
           JOIN users u ON u.id = n.created_by_id
           WHERE n.created_by_id = $3
             AND n.created_at::date >= $1 AND n.created_at::date <= $2
@@ -4948,7 +5061,7 @@ async function startServer() {
           FROM accounts a
           WHERE a.assigned_rep_id = $3
             AND a.follow_up_date >= $1::date AND a.follow_up_date <= $2::date
-            AND a.deleted_at IS NULL
+            AND a.deleted_at IS NULL AND a.inactive_at IS NULL
           ORDER BY a.follow_up_date ASC
         `;
         repFollowUps = await queryAll(followUpQuery, [startDate, endDate, repId]);
@@ -5229,6 +5342,12 @@ async function startServer() {
           SELECT 1 FROM customer_alert_dismissals d
           WHERE LOWER(d.customer_name) = LOWER(l.customer_name)
         )
+        AND NOT EXISTS (
+          SELECT 1 FROM accounts ia
+          WHERE ia.deleted_at IS NULL AND ia.inactive_at IS NOT NULL
+            AND (LOWER(ia.shop_name) = LOWER(l.customer_name)
+              OR LOWER(ia.pcr_shop_name) = LOWER(l.customer_name))
+        )
         ORDER BY c.total_revenue DESC NULLS LAST
       `);
       res.json({ alerts, total: alerts.length });
@@ -5324,12 +5443,14 @@ async function startServer() {
         ? `SELECT ra.*, a.shop_name FROM reorder_alerts ra
            LEFT JOIN accounts a ON ra.account_id = a.id
            WHERE ra.rep_id = $1 AND ra.alert_status NOT IN ('resolved')
+             AND (a.id IS NULL OR a.inactive_at IS NULL)
            ORDER BY ra.days_overdue DESC`
         : `SELECT ra.*, a.shop_name, u.first_name AS rep_first_name, u.last_name AS rep_last_name
            FROM reorder_alerts ra
            LEFT JOIN accounts a ON ra.account_id = a.id
            LEFT JOIN users u ON ra.rep_id = u.id
            WHERE ra.alert_status NOT IN ('resolved')
+             AND (a.id IS NULL OR a.inactive_at IS NULL)
            ORDER BY ra.days_overdue DESC`;
       const alerts = isRep
         ? await queryAll(sql, [req.user.userId])

@@ -66,6 +66,52 @@ CREATE TABLE IF NOT EXISTS activities (
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- ─── ACCOUNT ARCHIVING (INACTIVE) ──────────────────────────────────
+-- An archived ("inactive") account is one the team is no longer pursuing.
+-- It is kept in full — notes, activities and sales history are untouched —
+-- but it is hidden from every operational list and excluded from all
+-- activity reporting. Historical sales still roll up into revenue reports.
+--
+-- Archiving is tracked on its own columns rather than on `status` so that:
+--   1. the nightly PCR/AccountEdge sync (which owns `status`) cannot
+--      silently un-archive a shop, and
+--   2. the account's real pipeline status is preserved for reactivation.
+--
+-- NB: this block must stay ABOVE the accounts_status_check re-assertion
+-- below. The backfill clears any legacy status='inactive' row; if it ran
+-- after the constraint was re-added, that row would abort startup.
+ALTER TABLE accounts ADD COLUMN IF NOT EXISTS inactive_at TIMESTAMPTZ;
+ALTER TABLE accounts ADD COLUMN IF NOT EXISTS inactive_by_id INTEGER REFERENCES users(id);
+ALTER TABLE accounts ADD COLUMN IF NOT EXISTS inactive_reason TEXT;
+ALTER TABLE accounts ADD COLUMN IF NOT EXISTS inactive_note TEXT;
+ALTER TABLE accounts ADD COLUMN IF NOT EXISTS status_before_inactive TEXT;
+ALTER TABLE accounts ADD COLUMN IF NOT EXISTS reactivated_at TIMESTAMPTZ;
+ALTER TABLE accounts ADD COLUMN IF NOT EXISTS reactivated_by_id INTEGER REFERENCES users(id);
+
+-- Backfill: any row the old toggle managed to set to status='inactive'
+-- becomes a properly archived row, and `status` is restored to a valid
+-- pipeline value so the constraint below and the PCR sync both behave.
+--
+-- Guarded on account_category because that column is added further down this
+-- file: on a brand-new database it does not exist yet at this point. A new
+-- database also has no rows, so skipping the backfill there is correct.
+DO $backfill$
+BEGIN
+  IF EXISTS (SELECT 1 FROM information_schema.columns
+              WHERE table_schema = 'public'
+                AND table_name = 'accounts'
+                AND column_name = 'account_category') THEN
+    EXECUTE $q$
+      UPDATE accounts
+         SET inactive_at     = COALESCE(inactive_at, updated_at, NOW()),
+             inactive_reason = COALESCE(inactive_reason, 'not_pursuing'),
+             inactive_note   = COALESCE(inactive_note, 'Migrated from the previous inactive flag.'),
+             status          = CASE WHEN account_category = 'customer' THEN 'active' ELSE 'prospect' END
+       WHERE status = 'inactive'
+    $q$;
+  END IF;
+END $backfill$;
+
 -- Widen status constraint to include on_hold
 ALTER TABLE accounts DROP CONSTRAINT IF EXISTS accounts_status_check;
 DO $$ BEGIN
@@ -499,6 +545,23 @@ CREATE TABLE IF NOT EXISTS account_contract_files (
 );
 CREATE INDEX IF NOT EXISTS idx_account_contract_files_account
   ON account_contract_files(account_id);
+-- ─── ACCOUNT ARCHIVING: indexes and audit actions ──────────────────
+-- Partial index: the hot path is "everything still in play", so index the
+-- archived rows only and let the planner use NULL-ness for the common case.
+CREATE INDEX IF NOT EXISTS idx_accounts_inactive_at
+  ON accounts(inactive_at) WHERE inactive_at IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_accounts_live
+  ON accounts(account_category, status) WHERE deleted_at IS NULL AND inactive_at IS NULL;
+
+-- Audit-log actions used by archiving (and by CSV export, whose audit insert
+-- was silently failing against the narrower original constraint).
+ALTER TABLE audit_log DROP CONSTRAINT IF EXISTS audit_log_action_check;
+DO $$ BEGIN
+  ALTER TABLE audit_log ADD CONSTRAINT audit_log_action_check
+    CHECK(action IN ('create','update','delete','import','login','logout',
+                     'export_csv','inactivate','reactivate','toggle_active'));
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
 
 -- ─── FIX SERIAL SEQUENCES ──────────────────────────────────────────
 -- After bulk imports, serial sequences can fall behind the actual max id,

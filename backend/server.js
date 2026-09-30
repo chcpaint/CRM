@@ -6149,6 +6149,40 @@ async function startServer() {
     } catch (err) {
       console.error('  Double-encoding fix warning:', err.message);
     }
+
+    // Auto-populate weekly reports for all active reps on startup
+    try {
+      const monday = getMonday(new Date());
+      const weekOf = formatWeekDate(monday);
+      const users = await queryAll(
+        `SELECT id, first_name, last_name FROM users WHERE role IN ('rep','admin','manager') AND is_active = true AND show_in_weekly_report = true ORDER BY id`
+      );
+      let created = 0;
+      for (const u of users) {
+        const existing = await queryOne(
+          `SELECT id FROM weekly_reports WHERE rep_id = $1 AND week_of = $2`, [u.id, weekOf]
+        );
+        if (!existing) {
+          const stats = await computeWeeklyStats(u.id, weekOf);
+          await queryOne(
+            `INSERT INTO weekly_reports (rep_id, week_of, status,
+              stats_accounts_contacted, stats_new_accounts, stats_activities_logged,
+              stats_follow_ups_due, stats_weekly_sales, stats_dormant_accounts)
+             VALUES ($1, $2, 'draft', $3, $4, $5, $6, $7, $8)
+             ON CONFLICT (rep_id, week_of) DO NOTHING
+             RETURNING id`,
+            [u.id, weekOf, stats.stats_accounts_contacted, stats.stats_new_accounts,
+             stats.stats_activities_logged, stats.stats_follow_ups_due,
+             stats.stats_weekly_sales, stats.stats_dormant_accounts]
+          );
+          created++;
+        }
+      }
+      if (created > 0) console.log(`  Weekly reports: created ${created} new reports for week of ${weekOf}`);
+      else console.log(`  Weekly reports: all ${users.length} reports exist for week of ${weekOf}`);
+    } catch (err) {
+      console.error('  Weekly report auto-populate warning:', err.message);
+    }
   });
 }
 

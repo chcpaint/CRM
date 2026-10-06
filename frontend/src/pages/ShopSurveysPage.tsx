@@ -403,8 +403,10 @@ export default function ShopSurveysPage({ user }: { user: User }) {
   const fetchSurveyDetail = useCallback(async (id: string) => {
     setDetailLoading(true);
     try {
-      const items = await api.get<SurveyItem[]>(`/shop-surveys/${id}/items`);
-      setSurveyItems(Array.isArray(items) ? items : []);
+      const detail = await api.get<Survey & { items: SurveyItem[] }>(`/shop-surveys/${id}`);
+      setSurveyItems(Array.isArray(detail.items) ? detail.items : []);
+      // Update selectedSurvey with full detail (may have more fields than list view)
+      setSelectedSurvey(detail);
     } catch {
       setSurveyItems([]);
     } finally {

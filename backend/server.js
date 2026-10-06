@@ -6044,6 +6044,152 @@ async function startServer() {
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
 
+  // ============================================================
+  // Shop Surveys / CHC Systems & Assets
+  // ============================================================
+
+  const SURVEY_SB_URL = 'https://umhqhfwhnuokyyurdfik.supabase.co';
+  const SURVEY_SB_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InVtaHFoZndobnVva3l5dXJkZmlrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODI5MTg1MDYsImV4cCI6MjA5ODQ5NDUwNn0.H_yzOnSc75P3uIG0t1Q-tffvs0dbiY2Z4J1vZWHwLg4';
+
+  // Helper to call survey Supabase REST
+  async function surveyFetch(path, options = {}) {
+    const url = `${SURVEY_SB_URL}/rest/v1/${path}`;
+    const headers = {
+      'apikey': SURVEY_SB_KEY,
+      'Authorization': `Bearer ${SURVEY_SB_KEY}`,
+      'Content-Type': 'application/json',
+      'Prefer': options.prefer || 'return=representation',
+      ...options.headers
+    };
+    const res = await fetch(url, { ...options, headers });
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`Supabase error ${res.status}: ${text}`);
+    }
+    if (options.prefer === 'return=minimal') return null;
+    return res.json();
+  }
+
+  // GET /api/shop-surveys/storage-url — public storage base URL
+  app.get('/api/shop-surveys/storage-url', authenticate, (_req, res) => {
+    res.json({ url: 'https://umhqhfwhnuokyyurdfik.supabase.co/storage/v1/object/public/shop-survey/' });
+  });
+
+  // GET /api/shop-surveys — list all surveys with item counts
+  app.get('/api/shop-surveys', authenticate, async (_req, res) => {
+    try {
+      const surveys = await surveyFetch('shop_surveys?select=*,shop_survey_items(id)&order=created_at.desc');
+      const result = surveys.map(s => {
+        const { shop_survey_items, ...rest } = s;
+        return { ...rest, item_count: shop_survey_items ? shop_survey_items.length : 0 };
+      });
+      res.json(result);
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
+  // GET /api/shop-surveys/:id — single survey with all items
+  app.get('/api/shop-surveys/:id', authenticate, async (req, res) => {
+    try {
+      const rows = await surveyFetch(`shop_surveys?id=eq.${req.params.id}&select=*,shop_survey_items(*)`);
+      if (!rows.length) return res.status(404).json({ error: 'Survey not found' });
+      const survey = rows[0];
+      survey.items = survey.shop_survey_items || [];
+      delete survey.shop_survey_items;
+      res.json(survey);
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
+  // POST /api/shop-surveys — create a survey
+  app.post('/api/shop-surveys', authenticate, async (req, res) => {
+    try {
+      const id = crypto.randomUUID();
+      const submittedBy = `${req.user.first_name} ${req.user.last_name}`.trim();
+      const body = { id, ...req.body, submitted_by: submittedBy };
+      const result = await surveyFetch('shop_surveys', {
+        method: 'POST',
+        body: JSON.stringify(body)
+      });
+      res.status(201).json(result[0] || result);
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
+  // PUT /api/shop-surveys/:id — update survey fields
+  app.put('/api/shop-surveys/:id', authenticate, async (req, res) => {
+    try {
+      const result = await surveyFetch(`shop_surveys?id=eq.${req.params.id}`, {
+        method: 'PATCH',
+        body: JSON.stringify(req.body)
+      });
+      if (!result.length) return res.status(404).json({ error: 'Survey not found' });
+      res.json(result[0]);
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
+  // PUT /api/shop-surveys/:id/status — update just the status
+  app.put('/api/shop-surveys/:id/status', authenticate, async (req, res) => {
+    try {
+      const { status } = req.body;
+      const result = await surveyFetch(`shop_surveys?id=eq.${req.params.id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ status })
+      });
+      if (!result.length) return res.status(404).json({ error: 'Survey not found' });
+      res.json(result[0]);
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
+  // DELETE /api/shop-surveys/:id — delete survey and its items
+  app.delete('/api/shop-surveys/:id', authenticate, async (req, res) => {
+    try {
+      // Delete items first
+      await surveyFetch(`shop_survey_items?survey_id=eq.${req.params.id}`, {
+        method: 'DELETE',
+        prefer: 'return=minimal'
+      });
+      // Delete the survey
+      await surveyFetch(`shop_surveys?id=eq.${req.params.id}`, {
+        method: 'DELETE',
+        prefer: 'return=minimal'
+      });
+      res.status(204).end();
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
+  // POST /api/shop-surveys/:id/items — bulk insert items
+  app.post('/api/shop-surveys/:id/items', authenticate, async (req, res) => {
+    try {
+      const items = req.body.map(item => ({ ...item, survey_id: req.params.id }));
+      const result = await surveyFetch('shop_survey_items', {
+        method: 'POST',
+        body: JSON.stringify(items)
+      });
+      res.status(201).json(result);
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
+  // PUT /api/shop-survey-items/:id — update a single item
+  app.put('/api/shop-survey-items/:id', authenticate, async (req, res) => {
+    try {
+      const result = await surveyFetch(`shop_survey_items?id=eq.${req.params.id}`, {
+        method: 'PATCH',
+        body: JSON.stringify(req.body)
+      });
+      if (!result.length) return res.status(404).json({ error: 'Item not found' });
+      res.json(result[0]);
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
+  // DELETE /api/shop-survey-items/:id — delete a single item
+  app.delete('/api/shop-survey-items/:id', authenticate, async (req, res) => {
+    try {
+      await surveyFetch(`shop_survey_items?id=eq.${req.params.id}`, {
+        method: 'DELETE',
+        prefer: 'return=minimal'
+      });
+      res.status(204).end();
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
   // Lightweight endpoint the frontend polls to detect new deploys
   app.get('/api/version', (_req, res) => {
     res.set('Cache-Control', 'no-store, must-revalidate');

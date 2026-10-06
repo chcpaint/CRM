@@ -13,6 +13,7 @@ import HoldsPage from './pages/HoldsPage';
 import CustomerAlertsPage from './pages/CustomerAlertsPage';
 import CompetitiveMarketInfoPage from './pages/CompetitiveMarketInfoPage';
 import WeeklyReportPage from './pages/WeeklyReportPage';
+import ShopSurveysPage from './pages/ShopSurveysPage';
 import Layout from './components/layout/Layout';
 import UpdateBanner from './components/UpdateBanner';
 import ReminderNotifier from './components/ReminderNotifier';
@@ -95,6 +96,7 @@ export default function App() {
         <Route path="/customer-alerts" element={<CustomerAlertsPage user={user} />} />
         <Route path="/competitive-market-info" element={<CompetitiveMarketInfoPage user={user} />} />
         <Route path="/weekly-report" element={<WeeklyReportPage user={user} />} />
+        <Route path="/shop-surveys" element={<ShopSurveysPage user={user} />} />
         {(user.role === 'admin' || user.role === 'manager') && (
           <Route path="/admin" element={<AdminPage user={user} />} />
         )}

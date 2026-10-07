@@ -423,13 +423,14 @@ async function startServer() {
       const { current_password, new_password } = req.body;
       if (!current_password || !new_password) return res.status(400).json({ error: 'Current and new passwords are required' });
       if (new_password.length < 6) return res.status(400).json({ error: 'New password must be at least 6 characters' });
-      const user = await queryOne('SELECT id, password_hash FROM users WHERE id=$1', [req.user.id]);
+      const uid = req.user.userId || req.user.id;
+      const user = await queryOne('SELECT id, password_hash FROM users WHERE id=$1', [uid]);
       if (!user) return res.status(404).json({ error: 'User not found' });
       const valid = await bcrypt.compare(current_password, user.password_hash);
       if (!valid) return res.status(401).json({ error: 'Current password is incorrect' });
       const hash = await bcrypt.hash(new_password, 12);
-      await execute('UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2', [hash, req.user.id]);
-      await logAudit(req, 'user', req.user.id, 'update', { action: 'password_changed' });
+      await execute('UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2', [hash, uid]);
+      await logAudit(req, 'user', uid, 'update', { action: 'password_changed' });
       res.json({ message: 'Password updated successfully' });
     } catch (e) { res.status(500).json({ error: e.message }); }
   });

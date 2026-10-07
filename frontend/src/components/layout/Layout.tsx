@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { User } from '../../types';
+import { api } from '../../services/api';
 import AISearchBar from '../search/AISearchBar';
 import NotificationBell from '../notifications/NotificationBell';
 import BodyShopWiz from '../BodyShopWiz';
@@ -15,8 +16,42 @@ interface LayoutProps {
 export default function Layout({ user, onLogout, children }: LayoutProps) {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [moreOpen, setMoreOpen] = useState(false);
+  const [showPasswordModal, setShowPasswordModal] = useState(false);
+  const [pwCurrent, setPwCurrent] = useState('');
+  const [pwNew, setPwNew] = useState('');
+  const [pwConfirm, setPwConfirm] = useState('');
+  const [pwError, setPwError] = useState('');
+  const [pwSuccess, setPwSuccess] = useState('');
+  const [pwLoading, setPwLoading] = useState(false);
   const location = useLocation();
   const navigate = useNavigate();
+
+  const openPasswordModal = () => {
+    setPwCurrent(''); setPwNew(''); setPwConfirm('');
+    setPwError(''); setPwSuccess(''); setPwLoading(false);
+    setShowPasswordModal(true);
+  };
+
+  const handleChangePassword = async () => {
+    setPwError(''); setPwSuccess('');
+    if (!pwCurrent) return setPwError('Enter your current password');
+    if (pwNew.length < 6) return setPwError('New password must be at least 6 characters');
+    if (pwNew !== pwConfirm) return setPwError('New passwords do not match');
+    setPwLoading(true);
+    try {
+      const res = await api.put<{ message: string }>('/auth/change-password', {
+        current_password: pwCurrent,
+        new_password: pwNew,
+      });
+      setPwSuccess(res.message || 'Password updated!');
+      setPwCurrent(''); setPwNew(''); setPwConfirm('');
+      setTimeout(() => setShowPasswordModal(false), 1500);
+    } catch (e: any) {
+      setPwError(e?.message || 'Failed to change password');
+    } finally {
+      setPwLoading(false);
+    }
+  };
 
   // Primary bottom-nav items (most used by the team)
   const primaryNav = [
@@ -90,6 +125,13 @@ export default function Layout({ user, onLogout, children }: LayoutProps) {
               <div className="text-sm font-medium">{user.first_name} {user.last_name}</div>
               <div className="text-xs text-navy-300 capitalize">{user.role}</div>
             </div>
+            <button
+              onClick={openPasswordModal}
+              className="text-xs sm:text-sm text-navy-300 hover:text-white px-2 sm:px-3 py-1.5 rounded-lg hover:bg-navy-800 transition-colors"
+              title="Change Password"
+            >
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" /></svg>
+            </button>
             <button
               onClick={onLogout}
               className="text-xs sm:text-sm text-navy-300 hover:text-white px-2 sm:px-3 py-1.5 rounded-lg hover:bg-navy-800 transition-colors"
@@ -213,6 +255,76 @@ export default function Layout({ user, onLogout, children }: LayoutProps) {
 
       {/* Quick Notes sidebar */}
       <QuickNotes />
+
+      {/* Change Password Modal */}
+      {showPasswordModal && (
+        <>
+          <div className="fixed inset-0 bg-black/50 z-[100]" onClick={() => setShowPasswordModal(false)} />
+          <div className="fixed inset-0 z-[101] flex items-center justify-center p-4">
+            <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md p-6">
+              <h2 className="text-lg font-bold text-navy-900 mb-1">Change Password</h2>
+              <p className="text-sm text-gray-500 mb-4">Enter your current password and choose a new one.</p>
+
+              {pwError && (
+                <div className="mb-3 p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700">{pwError}</div>
+              )}
+              {pwSuccess && (
+                <div className="mb-3 p-3 bg-green-50 border border-green-200 rounded-lg text-sm text-green-700">{pwSuccess}</div>
+              )}
+
+              <div className="space-y-3">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Current Password</label>
+                  <input
+                    type="password"
+                    value={pwCurrent}
+                    onChange={(e) => setPwCurrent(e.target.value)}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-brand-500 focus:border-brand-500 outline-none"
+                    placeholder="Enter current password"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">New Password</label>
+                  <input
+                    type="password"
+                    value={pwNew}
+                    onChange={(e) => setPwNew(e.target.value)}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-brand-500 focus:border-brand-500 outline-none"
+                    placeholder="At least 6 characters"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Confirm New Password</label>
+                  <input
+                    type="password"
+                    value={pwConfirm}
+                    onChange={(e) => setPwConfirm(e.target.value)}
+                    onKeyDown={(e) => e.key === 'Enter' && handleChangePassword()}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-brand-500 focus:border-brand-500 outline-none"
+                    placeholder="Re-enter new password"
+                  />
+                </div>
+              </div>
+
+              <div className="flex gap-3 mt-5">
+                <button
+                  onClick={() => setShowPasswordModal(false)}
+                  className="flex-1 px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 rounded-lg hover:bg-gray-200 transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={handleChangePassword}
+                  disabled={pwLoading}
+                  className="flex-1 px-4 py-2 text-sm font-medium text-white bg-brand-600 rounded-lg hover:bg-brand-700 transition-colors disabled:opacity-50"
+                >
+                  {pwLoading ? 'Updating...' : 'Update Password'}
+                </button>
+              </div>
+            </div>
+          </div>
+        </>
+      )}
     </div>
   );
 }
